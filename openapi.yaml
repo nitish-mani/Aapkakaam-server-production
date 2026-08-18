@@ -1,0 +1,383 @@
+openapi: 3.0.3
+info:
+  title: Aapkakaam Server API
+  version: 1.0.0
+  description: |
+    REST API for the Aapkakaam platform (users, vendors, employees, admin,
+    bookings, payments, referrals). All authenticated endpoints require an
+    `Authorization: Bearer <jwt>` header signed with the audience-specific
+    secret (user/vendor/admin/employee).
+  contact:
+    name: Aapkakaam
+servers:
+  - url: http://localhost:3000
+    description: Local
+  - url: https://api.aapkakaam.com
+    description: Production
+tags:
+  - name: Health
+  - name: User Auth
+  - name: Vendor Auth
+  - name: Admin Auth
+  - name: Employee Auth
+  - name: User
+  - name: Vendor
+  - name: Bookings
+  - name: Payments
+  - name: Pincode
+  - name: Share
+  - name: Admin
+
+components:
+  securitySchemes:
+    UserBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT signed with `JWT_USER_SECRET` containing `userId`.
+    VendorBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    AdminBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    EmployeeBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        uptime: { type: number, example: 123.4 }
+    ApiHealth:
+      allOf:
+        - $ref: '#/components/schemas/Health'
+        - type: object
+          properties:
+            service: { type: string, example: aapkakaam-server }
+            environment: { type: string, example: production }
+            timestamp: { type: string, format: date-time }
+    ErrorResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string }
+    LoginRequest:
+      type: object
+      required: [phoneNo, password]
+      properties:
+        phoneNo: { type: string, example: '9876543210' }
+        password: { type: string, format: password, example: 'Str0ng!Pass' }
+        fcmToken: { type: string, nullable: true }
+    UserSignupRequest:
+      type: object
+      required: [name, phoneNo, password]
+      properties:
+        name: { type: string }
+        phoneNo: { type: string }
+        email: { type: string, format: email, nullable: true }
+        password: { type: string, format: password, minLength: 6 }
+        gender: { type: string, enum: [male, female, other], nullable: true }
+        sharedBy: { type: string, nullable: true, description: Referrer id }
+        cd: { type: string, enum: [user, vendor, employee], nullable: true, description: Referrer type }
+        fcmToken: { type: string, nullable: true }
+        agreedToTnCnP: { type: boolean }
+    AuthTokenResponse:
+      type: object
+      properties:
+        token: { type: string, format: jwt }
+        userId: { type: string }
+        name: { type: string }
+        message: { type: string }
+    BookingCreateRequest:
+      type: object
+      properties:
+        vendorId: { type: string }
+        type: { type: string, description: Job/service type }
+        bookingDate: { type: string, format: date-time }
+        pincode: { type: string }
+        address: { type: string }
+        amount: { type: number }
+    AnalyticsResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        cached: { type: boolean }
+        data:
+          type: object
+          properties:
+            generatedAt: { type: string, format: date-time }
+            totals:
+              type: object
+              properties:
+                users: { type: integer }
+                vendors: { type: integer }
+                employees: { type: integer }
+                bookings: { type: integer }
+            bookings:
+              type: object
+              properties:
+                today: { type: integer }
+                thisMonth: { type: integer }
+            revenue:
+              type: object
+              properties:
+                gmvThisMonth: { type: number }
+                transactionsThisMonth: { type: integer }
+                currency: { type: string, example: INR }
+            referrals:
+              type: object
+              properties:
+                totalShares: { type: integer }
+                completed: { type: integer }
+                conversionPct: { type: number }
+  responses:
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Detailed health payload
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiHealth' }
+
+  /api/user/signup:
+    post:
+      tags: [User Auth]
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserSignupRequest' }
+      responses:
+        '201':
+          description: Created
+        '400':
+          description: Validation error
+        '409':
+          description: Phone already registered
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/user/login:
+    post:
+      tags: [User Auth]
+      summary: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokenResponse' }
+        '400':
+          description: Missing phone/password
+        '401':
+          description: Wrong credentials
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/user/getUserByUser/{userId}:
+    get:
+      tags: [User]
+      summary: Get authenticated user's profile
+      security: [{ UserBearer: [] }]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/vendor/signup:
+    post:
+      tags: [Vendor Auth]
+      summary: Register a new vendor
+      responses:
+        '201': { description: Created }
+        '400': { description: Validation error }
+        '409': { description: Phone already registered }
+
+  /api/vendor/login:
+    post:
+      tags: [Vendor Auth]
+      summary: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokenResponse' }
+        '401': { description: Wrong credentials }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/vendor/getAll/{type}/{pincode}/{bookingDate}/{page}/{minRating}/{minWageRate}:
+    get:
+      tags: [Vendor]
+      summary: List available vendors for a job type / pincode
+      security: [{ UserBearer: [] }]
+      parameters:
+        - { in: path, name: type, required: true, schema: { type: string } }
+        - { in: path, name: pincode, required: true, schema: { type: string } }
+        - { in: path, name: bookingDate, required: true, schema: { type: string } }
+        - { in: path, name: page, required: true, schema: { type: integer } }
+        - { in: path, name: minRating, required: true, schema: { type: number } }
+        - { in: path, name: minWageRate, required: true, schema: { type: number } }
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/admin/login:
+    post:
+      tags: [Admin Auth]
+      summary: Admin login
+      responses:
+        '200': { description: Logged in }
+        '401': { description: Wrong credentials }
+
+  /api/admin/analytics:
+    get:
+      tags: [Admin]
+      summary: Ops analytics dashboard (cached 60s)
+      security: [{ AdminBearer: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalyticsResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/employee/login:
+    post:
+      tags: [Employee Auth]
+      summary: Employee login
+      responses:
+        '200': { description: Logged in }
+        '401': { description: Wrong credentials }
+
+  /api/bookings/postToBookingsU:
+    post:
+      tags: [Bookings]
+      summary: Create a booking (user side)
+      security: [{ UserBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookingCreateRequest' }
+      responses:
+        '201': { description: Created }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/bookings/getOrdersU/{userId}/{pageNo}:
+    get:
+      tags: [Bookings]
+      summary: List user bookings (paginated)
+      security: [{ UserBearer: [] }]
+      parameters:
+        - { in: path, name: userId, required: true, schema: { type: string } }
+        - { in: path, name: pageNo, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/payment/create-order:
+    post:
+      tags: [Payments]
+      summary: Create a Razorpay order
+      security: [{ UserBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: number, description: Amount in INR (converted to paise) }
+                currency: { type: string, default: INR }
+                receipt: { type: string }
+      responses:
+        '200': { description: Order created }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Order creation failed }
+
+  /api/payment/verify-payment:
+    post:
+      tags: [Payments]
+      summary: Verify Razorpay signature & credit wallet
+      security: [{ UserBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [razorpay_order_id, razorpay_payment_id, razorpay_signature]
+              properties:
+                razorpay_order_id: { type: string }
+                razorpay_payment_id: { type: string }
+                razorpay_signature: { type: string }
+                userId: { type: string, nullable: true }
+                vendorId: { type: string, nullable: true }
+                balance: { type: number }
+                discountPercent: { type: number }
+      responses:
+        '200': { description: Verified }
+        '400': { description: Invalid signature }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/pincode/getU:
+    post:
+      tags: [Pincode]
+      summary: Pincode lookup (user)
+      responses:
+        '200': { description: OK }
+
+  /api/share/postU:
+    post:
+      tags: [Share]
+      summary: Track a referral share (user)
+      security: [{ UserBearer: [] }]
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
