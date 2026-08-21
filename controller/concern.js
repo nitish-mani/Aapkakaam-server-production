@@ -1,6 +1,9 @@
 const mongoose = require("mongoose");
 const Concern = require("../models/concern");
+const User = require("../models/user");
+const Vendor = require("../models/vendor");
 
+const NotificationService = require("../src/services/NotificationService");
 const { ObjectId } = mongoose.Types;
 
 // ============================================================
@@ -486,6 +489,28 @@ const updateConcernStatus = async (req, res) => {
     }
 
     // --------------------------------------------------------
+    // Get existing concern first
+    // --------------------------------------------------------
+
+    const existingConcern = await Concern.findOne({
+      _id: new ObjectId(concernId),
+      isDeleted: false,
+    }).lean();
+
+    if (!existingConcern) {
+      return res.status(404).json({
+        success: false,
+        message: "Concern not found",
+      });
+    }
+
+    // --------------------------------------------------------
+    // Check whether status actually changed
+    // --------------------------------------------------------
+
+    const statusChanged = existingConcern.status !== status;
+
+    // --------------------------------------------------------
     // Prepare update
     // --------------------------------------------------------
 
@@ -510,14 +535,11 @@ const updateConcernStatus = async (req, res) => {
     const concern = await Concern.findOneAndUpdate(
       {
         _id: new ObjectId(concernId),
-
         isDeleted: false,
       },
-
       {
         $set: updateData,
       },
-
       {
         new: true,
         runValidators: true,
@@ -531,19 +553,271 @@ const updateConcernStatus = async (req, res) => {
       });
     }
 
+    // ========================================================
+    // PUSH NOTIFICATION
+    // ========================================================
+
+    let notificationQueued = false;
+    let notificationId = null;
+    let notificationError = null;
+
+    /**
+     * Only send push when status actually changes.
+     *
+     * Open -> InProgress
+     * InProgress -> Resolved
+     *
+     * But:
+     *
+     * Resolved -> Resolved
+     *
+     * will NOT send another push.
+     */
+    if (statusChanged) {
+      try {
+        let recipient = null;
+
+        // ----------------------------------------------------
+        // User concern
+        // ----------------------------------------------------
+
+        if (existingConcern.raisedBy === "User") {
+          const User = require("../models/user");
+
+          recipient = await User.findById(existingConcern.raisedById)
+            .select("_id name fcmToken")
+            .lean();
+        }
+
+        // ----------------------------------------------------
+        // Vendor concern
+        // ----------------------------------------------------
+        else if (existingConcern.raisedBy === "Vendor") {
+          const Vendor = require("../models/vendor");
+
+          recipient = await Vendor.findById(existingConcern.raisedById)
+            .select("_id name fcmToken")
+            .lean();
+        }
+
+        // ----------------------------------------------------
+        // Recipient not found
+        // ----------------------------------------------------
+
+        if (!recipient) {
+          console.warn(
+            `[ConcernNotification] Recipient not found: ${existingConcern.raisedBy}:${existingConcern.raisedById}`,
+          );
+        } else {
+          const pushToken = String(recipient.fcmToken || "").trim();
+
+          // --------------------------------------------------
+          // FCM token missing
+          // --------------------------------------------------
+
+          if (!pushToken) {
+            console.warn(
+              `[ConcernNotification] FCM token missing for ${existingConcern.raisedBy}:${existingConcern.raisedById}`,
+            );
+          } else {
+            // ------------------------------------------------
+            // Build notification content
+            // ------------------------------------------------
+
+            let title = "Concern Updated";
+
+            let body = `Your concern "${existingConcern.subject}" ` + "has been updated.";
+
+            switch (status) {
+              case "Open":
+                title = "Concern Opened";
+
+                body = `Your concern "${existingConcern.subject}" ` + "is now open.";
+
+                break;
+
+              case "InProgress":
+                title = "Concern In Progress";
+
+                body =
+                  `Your concern "${existingConcern.subject}" ` +
+                  "is now being reviewed by our team.";
+
+                break;
+
+              case "Resolved":
+                title = "Concern Resolved";
+
+                body = `Your concern "${existingConcern.subject}" ` + "has been resolved.";
+
+                break;
+
+              case "Rejected":
+                title = "Concern Rejected";
+
+                body = `Your concern "${existingConcern.subject}" ` + "has been rejected.";
+
+                break;
+
+              case "Closed":
+                title = "Concern Closed";
+
+                body = `Your concern "${existingConcern.subject}" ` + "has been closed.";
+
+                break;
+            }
+
+            // ------------------------------------------------
+            // Add admin response to notification body
+            // ------------------------------------------------
+
+            if (
+              ["Resolved", "Rejected"].includes(status) &&
+              adminResponse &&
+              adminResponse.trim()
+            ) {
+              body += ` Response: ${adminResponse.trim()}`;
+            }
+
+            // ------------------------------------------------
+            // User/Vendor ownership
+            // ------------------------------------------------
+
+            const userId = existingConcern.raisedBy === "User" ? existingConcern.raisedById : null;
+
+            const vendorId =
+              existingConcern.raisedBy === "Vendor" ? existingConcern.raisedById : null;
+
+            // ------------------------------------------------
+            // Queue push notification
+            // ------------------------------------------------
+
+            const notification = await NotificationService.sendPush({
+              userId,
+
+              vendorId,
+
+              pushToken,
+
+              template: "concern_status_updated",
+
+              templateData: {
+                title,
+
+                body,
+
+                type: "concern_status",
+
+                screen: "concerns",
+
+                data: {
+                  concernId: concernId.toString(),
+
+                  status,
+
+                  category: existingConcern.category,
+
+                  priority: existingConcern.priority,
+
+                  raisedBy: existingConcern.raisedBy,
+
+                  subject: existingConcern.subject,
+
+                  ...(adminResponse && adminResponse.trim()
+                    ? {
+                        adminResponse: adminResponse.trim(),
+                      }
+                    : {}),
+                },
+              },
+
+              source: "concern",
+
+              sourceId: concernId.toString(),
+
+              requestId: req.id || null,
+
+              priority: status === "Resolved" || status === "Rejected" ? 2 : 3,
+
+              tags: [
+                "concern",
+                "concern_status",
+                status.toLowerCase(),
+                existingConcern.raisedBy.toLowerCase(),
+              ],
+
+              // ------------------------------------------------
+              // Idempotency
+              // ------------------------------------------------
+              //
+              // Same concern + same status = one notification.
+              //
+              // Example:
+              //
+              // concern:abc:status:Resolved
+              //
+              // ------------------------------------------------
+
+              idempotencyKey: `concern:${concernId}:status:${status}`,
+            });
+
+            notificationQueued = true;
+
+            notificationId = notification?._id?.toString() || null;
+
+            console.log("[ConcernNotification] Push notification queued:", {
+              concernId,
+              notificationId,
+              raisedBy: existingConcern.raisedBy,
+              raisedById: existingConcern.raisedById.toString(),
+              status,
+            });
+          }
+        }
+      } catch (error) {
+        notificationError = error.message;
+
+        /**
+         * IMPORTANT
+         *
+         * Concern status update has already succeeded.
+         *
+         * Push notification failure must NOT make the
+         * API report concern-update failure.
+         */
+        console.error("[ConcernNotification] Failed to queue push notification:", error);
+      }
+    }
+
+    // ========================================================
+    // Response
+    // ========================================================
+
     return res.status(200).json({
       success: true,
 
       message: `Concern ${status.toLowerCase()} successfully`,
 
       concern,
+
+      notification: {
+        statusChanged,
+
+        queued: notificationQueued,
+
+        notificationId,
+
+        error: notificationError,
+      },
     });
   } catch (error) {
     console.error("updateConcernStatus error:", error);
 
     return res.status(500).json({
       success: false,
+
       message: "Failed to update concern",
+
       error: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }

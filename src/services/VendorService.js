@@ -1305,6 +1305,19 @@ class VendorService {
           .select(PROJECTION_STRING)
           .lean();
 
+        VendorLogger.info({
+          event: "VENDOR_AVAILABILITY_DEBUG",
+          type,
+          pincode,
+          bookingDate: cacheDate,
+          userIdentifier,
+          requestContext,
+          unavailableCount: excludedObjectIds.length,
+          totalAvailable: await Vendor.countDocuments(baseMatchStage),
+          freshCount: freshVendors.length,
+          freshVendorIds: freshVendors.map((v) => v._id.toString()),
+        });
+
         // ======================================================
         // Mark vendors as shown
         // ======================================================

@@ -21,25 +21,18 @@ router.post("/otpVerification", authRateLimiter, user_controller.user_controller
 router.post(
   "/phoneVerificationPasswordReset",
   authRateLimiter,
-  authenticate,
   user_controller.user_controller_verify_phoneNo_reset_password,
 );
 router.post(
   "/otpVerificationResetPassword",
   authRateLimiter,
-  authenticate,
   user_controller.user_controller_otp_reset_password,
 );
 
 router.post("/signup", authRateLimiter, user_auth.signup);
 router.post("/login", authRateLimiter, user_auth.login);
 
-router.patch(
-  "/edit/password",
-  authRateLimiter,
-  authenticate,
-  user_controller.user_controller_patch_password,
-);
+router.patch("/edit/password", authRateLimiter, user_controller.user_controller_patch_password);
 
 // --- Authenticated endpoints ----------------------------------
 

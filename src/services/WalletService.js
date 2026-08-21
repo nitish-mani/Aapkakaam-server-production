@@ -276,6 +276,7 @@ class WalletService {
         },
         "Wallet credited successfully with ledger entry",
       );
+      console.log("wallet", updated);
       return { entity: updated, ledger: ledgerEntry };
     } catch (error) {
       await session.abortTransaction();

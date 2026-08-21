@@ -16,30 +16,152 @@ class NotificationRepository {
   /**
    * Acquire notification for processing with optimistic concurrency
    */
+  /**
+   * Acquire notification for processing with optimistic concurrency
+   *
+   * IMPORTANT:
+   *
+   * BullMQ already guarantees that one job is actively assigned
+   * to one worker at a time.
+   *
+   * MongoDB additionally protects the notification document from
+   * concurrent processing.
+   */
   async acquireForProcessing(notificationId, attemptsMade) {
+    if (!notificationId) {
+      throw new Error("notificationId is required");
+    }
+
+    const now = new Date();
+
+    // ============================================================
+    // ATOMIC CLAIM
+    // ============================================================
+
     const notification = await Notification.findOneAndUpdate(
       {
         _id: notificationId,
-        status: { $in: NotificationStateMachine.PENDING_STATES },
-        $or: [{ nextRetry: { $exists: false } }, { nextRetry: { $lte: new Date() } }],
+
+        status: {
+          $in: ["queued", "pending", "retrying"],
+        },
+
+        $or: [
+          {
+            nextRetry: {
+              $exists: false,
+            },
+          },
+
+          {
+            nextRetry: null,
+          },
+
+          {
+            nextRetry: {
+              $lte: now,
+            },
+          },
+        ],
       },
+
       {
         $set: {
           status: "processing",
-          lastAttempt: new Date(),
+
+          lastAttempt: now,
+
           attempts: attemptsMade,
-          processedAt: new Date(),
-          updatedAt: new Date(),
+
+          processedAt: now,
+
+          updatedAt: now,
         },
       },
+
       {
         new: true,
+
         runValidators: true,
-        writeConcern: { w: "majority", j: true },
+
+        writeConcern: {
+          w: "majority",
+          j: true,
+        },
       },
     );
 
-    return notification;
+    // ============================================================
+    // CLAIM SUCCESSFUL
+    // ============================================================
+
+    if (notification) {
+      return notification;
+    }
+
+    // ============================================================
+    // CLAIM FAILED
+    // ============================================================
+
+    const existing = await Notification.findById(notificationId)
+      .select("_id status __v attempts channel channelIndex channelPolicy nextRetry")
+      .lean();
+
+    // ------------------------------------------------------------
+    // NOT FOUND
+    // ------------------------------------------------------------
+
+    if (!existing) {
+      throw new PermanentError(`Notification not found: ${notificationId}`);
+    }
+
+    // ------------------------------------------------------------
+    // ALREADY PROCESSING
+    // ------------------------------------------------------------
+
+    if (existing.status === "processing") {
+      return null;
+    }
+
+    // ------------------------------------------------------------
+    // ALREADY SENT
+    // ------------------------------------------------------------
+
+    if (existing.status === "sent") {
+      return null;
+    }
+
+    // ------------------------------------------------------------
+    // ALREADY FAILED
+    // ------------------------------------------------------------
+
+    if (existing.status === "failed") {
+      return null;
+    }
+
+    // ------------------------------------------------------------
+    // CANCELLED
+    // ------------------------------------------------------------
+
+    if (existing.status === "cancelled") {
+      return null;
+    }
+
+    // ------------------------------------------------------------
+    // RETRY NOT YET DUE
+    // ------------------------------------------------------------
+
+    if (existing.nextRetry && existing.nextRetry > now) {
+      return null;
+    }
+
+    // ------------------------------------------------------------
+    // UNKNOWN STATE
+    // ------------------------------------------------------------
+
+    throw new RetryableError(
+      `Unable to claim notification ${notificationId}. Current status: ${existing.status}`,
+    );
   }
 
   /**
@@ -97,7 +219,11 @@ class NotificationRepository {
    * ✅ Always includes __v (explicitly)
    */
   async getWithVersion(notificationId) {
-    return Notification.findById(notificationId).select("status __v").lean();
+    return Notification.findById(notificationId)
+      .select(
+        "status __v type channel channelIndex channelPolicy attempts template source recipient requestId nextRetry",
+      )
+      .lean();
   }
 
   /**

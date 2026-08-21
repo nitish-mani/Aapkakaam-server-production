@@ -495,6 +495,7 @@ class PaymentService {
 
       // Send notification (outside transaction)
       if (creditedEntity && updatedTransaction) {
+        console.log("notification", creditedEntity);
         await this.sendSuccessNotification(
           creditedEntity,
           updatedTransaction.finalAmount,
@@ -1436,7 +1437,7 @@ class PaymentService {
       source,
       { requestId, ipAddress },
     );
-
+    console.log("creditEntity", creditedEntity);
     PaymentLogger.info(
       {
         event: "PROCESS_PAYMENT_WALLET_CREDITED",
@@ -2457,7 +2458,9 @@ class PaymentService {
     }
 
     const entity = await Model.findById(entityId)
-      .select("_id name phoneNo balance totalDiscount transactionCount totalOriginalAmount")
+      .select(
+        "_id name phoneNo balance totalDiscount transactionCount totalOriginalAmount fcmToken",
+      )
       .lean();
 
     if (!entity) {
@@ -2479,56 +2482,308 @@ class PaymentService {
    * Send success notification
    */
   async sendSuccessNotification(entity, amount, transaction = null, requestId = null) {
+    console.log("in Notification", entity);
+
+    const transactionId = transaction?._id?.toString() || null;
+
+    const userId =
+      transaction?.userId?.toString?.() || transaction?.userId?._id?.toString?.() || null;
+
+    const vendorId =
+      transaction?.vendorId?.toString?.() || transaction?.vendorId?._id?.toString?.() || null;
+
+    // ============================================================
+    // VALIDATION
+    // ============================================================
+
+    if (!transactionId) {
+      PaymentLogger.warn(
+        {
+          event: "PAYMENT_SUCCESS_NOTIFICATION_SKIPPED",
+
+          userId,
+
+          vendorId,
+
+          requestId,
+
+          reason: "TRANSACTION_ID_MISSING",
+        },
+
+        "Payment success notification skipped because transaction ID is missing",
+      );
+
+      return {
+        attempted: 0,
+        queued: 0,
+        failed: 0,
+        results: [],
+      };
+    }
+
+    // ============================================================
+    // RECIPIENT INFORMATION
+    // ============================================================
+
+    const phoneNumber = entity?.phoneNo || null;
+
+    const pushToken = entity?.fcmToken || null;
+
+    const whatsappNumber = entity?.phoneNo || null;
+
+    PaymentLogger.info(
+      {
+        event: "PAYMENT_SUCCESS_NOTIFICATION_STARTED",
+
+        transactionId,
+
+        userId,
+
+        vendorId,
+
+        hasPhoneNumber: Boolean(phoneNumber),
+
+        hasFcmToken: Boolean(pushToken),
+
+        hasWhatsAppNumber: Boolean(whatsappNumber),
+
+        requestId,
+      },
+
+      "Preparing payment success notification",
+    );
+
+    // ============================================================
+    // CHECK AVAILABLE CHANNEL
+    // ============================================================
+
+    if (!phoneNumber && !pushToken) {
+      PaymentLogger.warn(
+        {
+          event: "PAYMENT_SUCCESS_NOTIFICATION_SKIPPED",
+
+          transactionId,
+
+          userId,
+
+          vendorId,
+
+          requestId,
+
+          reason: "NO_NOTIFICATION_RECIPIENT",
+        },
+
+        "Payment success notification skipped because no recipient channel is available",
+      );
+
+      return {
+        attempted: 0,
+        queued: 0,
+        failed: 0,
+        results: [],
+      };
+    }
+
+    // ============================================================
+    // ONE LOGICAL PAYMENT NOTIFICATION
+    // ============================================================
+    //
+    // Policy from notification.policy.js:
+    //
+    // PAYMENT
+    //    ↓
+    // PUSH
+    //    ↓ failure
+    // WHATSAPP
+    //    ↓ failure
+    // SMS
+    //
+    // We intentionally create ONLY ONE Notification document.
+    //
+    // The Worker/Dispatcher will perform the actual fallback.
+    //
+    // ============================================================
+
     try {
-      if (!entity?.phoneNo) {
-        return;
-      }
+      const notification = await NotificationService.createBusinessNotification({
+        type: "PAYMENT",
 
-      await NotificationService.sendSMS({
-        userId: transaction?.userId || null,
-        vendorId: transaction?.vendorId || null,
+        userId,
 
-        phoneNumber: entity.phoneNo,
+        vendorId,
+
+        recipient: {
+          phoneNumber,
+
+          whatsappNumber,
+
+          pushToken,
+        },
 
         template: "payment_success",
 
         templateData: {
-          name: entity.name || "Customer",
+          // ======================================================
+          // COMMON DATA
+          // ======================================================
+
+          name: entity?.name || "Customer",
+
+          amount,
+
           balance: amount,
-          transactionId: transaction?._id?.toString() || "",
+
+          transactionId,
+
           paymentId: transaction?.razorpayPaymentId || "",
+
           orderId: transaction?.razorpayOrderId || "",
+
+          // ======================================================
+          // PUSH DATA
+          // ======================================================
+
+          title: "Payment Successful",
+
+          body: `₹${amount} has been added to your wallet.`,
+
+          type: "payment",
+
+          screen: "profile",
+
+          data: {
+            transactionId,
+
+            paymentId: transaction?.razorpayPaymentId || "",
+
+            orderId: transaction?.razorpayOrderId || "",
+          },
         },
 
         source: "payment",
-        sourceId: transaction?._id?.toString(),
+
+        sourceId: transactionId,
 
         requestId,
 
         priority: 2,
 
-        tags: ["payment", "wallet"],
+        tags: ["payment", "wallet", "success"],
 
-        idempotencyKey: `payment:${transaction?._id}:success:sms`,
+        // IMPORTANT:
+        //
+        // ONE logical payment event
+        // = ONE idempotency key.
+        //
+        // Do NOT use:
+        //
+        // :sms
+        // :push
+        // :whatsapp
+        //
+        idempotencyKey: `payment:${transactionId}:success`,
       });
 
-      PaymentLogger.debug(
+      // ==========================================================
+      // QUEUED SUCCESSFULLY
+      // ==========================================================
+
+      PaymentLogger.info(
         {
-          event: "PAYMENT_NOTIFICATION_ENQUEUED",
-          transactionId: transaction?._id,
+          event: "PAYMENT_SUCCESS_NOTIFICATION_QUEUED",
+
+          transactionId,
+
+          notificationId: notification?._id?.toString() || null,
+
+          userId,
+
+          vendorId,
+
+          type: notification?.type,
+
+          channel: notification?.channel,
+
+          channelPolicy: notification?.channelPolicy,
+
           requestId,
         },
+
         "Payment success notification queued",
       );
+
+      return {
+        attempted: 1,
+
+        queued: 1,
+
+        failed: 0,
+
+        results: [
+          {
+            channel: notification?.channel || "PUSH",
+
+            success: true,
+
+            notificationId: notification?._id?.toString() || null,
+
+            type: notification?.type || "PAYMENT",
+
+            channelPolicy: notification?.channelPolicy || null,
+          },
+        ],
+      };
     } catch (error) {
+      // ==========================================================
+      // QUEUE FAILURE
+      // ==========================================================
+
       PaymentLogger.error(
         {
           err: error,
-          event: "PAYMENT_NOTIFICATION_FAILED",
-          transactionId: transaction?._id,
+
+          event: "PAYMENT_SUCCESS_NOTIFICATION_FAILED",
+
+          transactionId,
+
+          userId,
+
+          vendorId,
+
+          requestId,
+
+          errorCode: error?.code,
+
+          errorMessage: error?.message,
         },
+
         "Failed to queue payment success notification",
       );
+
+      // IMPORTANT:
+      //
+      // Payment has already succeeded.
+      //
+      // Notification failure must NOT make the
+      // payment transaction fail.
+
+      return {
+        attempted: 1,
+
+        queued: 0,
+
+        failed: 1,
+
+        results: [
+          {
+            channel: "PAYMENT",
+
+            success: false,
+
+            error: error?.message || "Failed to queue payment notification",
+          },
+        ],
+      };
     }
   }
 

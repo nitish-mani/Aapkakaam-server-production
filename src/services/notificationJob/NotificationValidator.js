@@ -1,50 +1,110 @@
 "use strict";
 
 const { PermanentError } = require("../../utils/retryableErrors");
+
 const CONFIG = require("../../config/notification.config");
+
 const NotificationStateMachine = require("./NotificationStateMachine");
 
-/**
- * NotificationValidator - Pure validation logic
- * Single Responsibility: Validate notification data only
- */
 class NotificationValidator {
-  /**
-   * Validate notification before processing
-   */
   validate(notification) {
-    // Check type
+    // ============================================================
+    // BASIC
+    // ============================================================
+
+    if (!notification) {
+      throw new PermanentError("Notification is required");
+    }
+
+    // ============================================================
+    // BUSINESS TYPE
+    // ============================================================
+
     if (!notification.type) {
       throw new PermanentError("Notification type is required");
     }
 
-    if (!CONFIG.VALID_NOTIFICATION_TYPES.includes(notification.type)) {
+    const notificationType = String(notification.type).trim().toUpperCase();
+
+    const validTypes = Array.isArray(CONFIG.VALID_NOTIFICATION_TYPES)
+      ? CONFIG.VALID_NOTIFICATION_TYPES.map((type) => String(type).trim().toUpperCase())
+      : [];
+
+    if (!validTypes.includes(notificationType)) {
       throw new PermanentError(`Invalid notification type: ${notification.type}`);
     }
 
-    // Provider-specific validation
-    const requiredFields = {
-      SMS: ["phoneNumber"],
-      EMAIL: ["email"],
-      PUSH: ["pushToken"],
-      TELEGRAM: ["telegramChatId"],
-      WHATSAPP: ["phoneNumber"],
-      IN_APP: ["userId"],
-    };
+    // ============================================================
+    // CHANNEL
+    // ============================================================
 
-    const fields = requiredFields[notification.type] || [];
-    for (const field of fields) {
-      if (!notification.recipient?.[field]) {
-        throw new PermanentError(`${notification.type} requires ${field}`);
+    if (!notification.channel) {
+      throw new PermanentError("Notification channel is required");
+    }
+
+    const channel = String(notification.channel).trim().toUpperCase();
+
+    const validChannels = Array.isArray(CONFIG.VALID_NOTIFICATION_CHANNELS)
+      ? CONFIG.VALID_NOTIFICATION_CHANNELS.map((item) => String(item).trim().toUpperCase())
+      : [];
+
+    if (!validChannels.includes(channel)) {
+      throw new PermanentError(`Invalid notification channel: ${notification.channel}`);
+    }
+
+    // ============================================================
+    // RECIPIENT STRUCTURE
+    // ============================================================
+
+    /**
+     * IMPORTANT
+     *
+     * Do NOT validate channel recipient fields here.
+     *
+     * Example:
+     *
+     * PUSH without pushToken
+     *
+     * is NOT an invalid notification.
+     *
+     * It simply means PUSH is unavailable and the
+     * NotificationDispatcher must try the next channel.
+     *
+     * Dispatcher owns:
+     *
+     * PUSH
+     *   ↓ unavailable/failure
+     * WHATSAPP
+     *   ↓ unavailable/failure
+     * SMS
+     *
+     * Validator owns only the notification structure.
+     */
+
+    if (!notification.recipient) {
+      throw new PermanentError("Notification recipient is required");
+    }
+
+    // ============================================================
+    // EXPIRATION
+    // ============================================================
+
+    if (notification.expiresAt) {
+      const expiresAt = new Date(notification.expiresAt);
+
+      if (Number.isNaN(expiresAt.getTime())) {
+        throw new PermanentError("Invalid notification expiration date");
+      }
+
+      if (new Date() > expiresAt) {
+        throw new PermanentError("Notification has expired");
       }
     }
 
-    // Check expiration
-    if (notification.expiresAt && new Date() > notification.expiresAt) {
-      throw new PermanentError("Notification has expired");
-    }
+    // ============================================================
+    // STATUS
+    // ============================================================
 
-    // Validate status if present
     if (notification.status) {
       NotificationStateMachine.validateStatus(notification.status);
     }

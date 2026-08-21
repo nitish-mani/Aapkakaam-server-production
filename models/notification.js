@@ -1,11 +1,37 @@
 "use strict";
 
 const mongoose = require("mongoose");
-const { Schema } = mongoose;
-const logger = require("../src/logger/logger"); // ✅ Import logger
 
-// Constants
-const VALID_NOTIFICATION_TYPES = ["SMS", "EMAIL", "PUSH", "TELEGRAM", "WHATSAPP", "IN_APP"];
+const { Schema } = mongoose;
+
+// ============================================
+// ENUMS / CONSTANTS
+// ============================================
+
+const VALID_NOTIFICATION_TYPES = [
+  "SMS",
+  "EMAIL",
+  "PUSH",
+  "TELEGRAM",
+  "WHATSAPP",
+  "IN_APP",
+  "OTP",
+  "BOOKING",
+  "CANCELLED",
+  "PAYMENT",
+];
+
+const VALID_CHANNELS = ["SMS", "EMAIL", "PUSH", "TELEGRAM", "WHATSAPP", "IN_APP"];
+
+const VALID_DELIVERY_STATUSES = ["pending", "processing", "sent", "failed", "skipped"];
+
+const DEFAULT_CHANNEL_POLICIES = {
+  OTP: ["SMS", "WHATSAPP"],
+  BOOKING: ["PUSH", "WHATSAPP", "SMS"],
+  CANCELLED: ["PUSH", "WHATSAPP", "SMS"],
+  PAYMENT: ["PUSH", "WHATSAPP", "SMS"],
+};
+
 const VALID_STATUSES = [
   "created",
   "queued",
@@ -15,40 +41,39 @@ const VALID_STATUSES = [
   "failed",
   "cancelled",
 ];
-const VALID_SOURCES = [
-  "payment",
-  "booking",
-  "auth",
-  "wallet",
-  "admin",
-  "system",
-  "marketing",
-  "monitoring",
-  "referral",
-  "webhook",
-  "cron",
-];
-const MAX_FAILURE_HISTORY = 10;
-const NOTIFICATION_TTL_DAYS = 90;
+
+const VALID_PRIORITIES = [1, 2, 3, 4, 5];
+
+// ============================================
+// NOTIFICATION SCHEMA
+// ============================================
 
 const notificationSchema = new Schema(
   {
-    /**
-     * Owner - Optional, at least one should be present
-     */
-    userId: {
-      type: Schema.Types.ObjectId,
-      ref: "User",
-      index: true,
-    },
-    vendorId: {
-      type: Schema.Types.ObjectId,
-      ref: "Vendor",
-      index: true,
-    },
+    // ==========================================
+    // BUSINESS / LEGACY TYPE
+    // ==========================================
 
     /**
-     * Notification Type - Uppercase normalized
+     * IMPORTANT:
+     *
+     * `type` is kept backward compatible.
+     *
+     * Existing code can continue using:
+     *
+     *   type: "SMS"
+     *   type: "PUSH"
+     *   type: "WHATSAPP"
+     *
+     * New business notification code can eventually
+     * use:
+     *
+     *   type: "BOOKING"
+     *   type: "PAYMENT"
+     *   type: "CANCELLED"
+     *   type: "OTP"
+     *
+     * after NotificationService is migrated.
      */
     type: {
       type: String,
@@ -59,61 +84,257 @@ const notificationSchema = new Schema(
         if (value) {
           return value.toUpperCase();
         }
+
         return value;
       },
     },
 
+    // ==========================================
+    // DELIVERY CHANNEL
+    // ==========================================
+
     /**
-     * Recipient Information
+     * Actual channel currently being attempted.
+     *
+     * Example:
+     *
+     * BOOKING
+     *   channel = PUSH
+     *
+     * PUSH fails:
+     *   channel = WHATSAPP
+     *
+     * WhatsApp fails:
+     *   channel = SMS
      */
+    channel: {
+      type: String,
+      enum: VALID_CHANNELS,
+      default: null,
+      index: true,
+    },
+
+    // ==========================================
+    // CHANNEL POLICY
+    // ==========================================
+
+    /**
+     * Defines delivery order and fallback behavior.
+     *
+     * Example:
+     *
+     * {
+     *   channels: ["PUSH", "WHATSAPP", "SMS"],
+     *   fallback: true
+     * }
+     */
+    channelPolicy: {
+      channels: {
+        type: [String],
+        enum: VALID_CHANNELS,
+        default: [],
+      },
+
+      fallback: {
+        type: Boolean,
+        default: true,
+      },
+    },
+
+    /**
+     * Current index inside channelPolicy.channels.
+     *
+     * 0 = PUSH
+     * 1 = WHATSAPP
+     * 2 = SMS
+     */
+    channelIndex: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    // ==========================================
+    // DELIVERY ATTEMPTS
+    // ==========================================
+
+    /**
+     * Tracks every provider/channel attempt.
+     *
+     * Example:
+     *
+     * PUSH      -> failed
+     * WHATSAPP  -> failed
+     * SMS       -> sent
+     */
+    deliveryAttempts: [
+      {
+        channel: {
+          type: String,
+          enum: VALID_CHANNELS,
+          required: true,
+        },
+
+        status: {
+          type: String,
+          enum: VALID_DELIVERY_STATUSES,
+          required: true,
+        },
+
+        attempt: {
+          type: Number,
+          min: 1,
+        },
+
+        startedAt: {
+          type: Date,
+        },
+
+        completedAt: {
+          type: Date,
+        },
+
+        provider: {
+          type: String,
+        },
+
+        providerMessageId: {
+          type: String,
+        },
+
+        error: {
+          code: {
+            type: String,
+          },
+
+          message: {
+            type: String,
+          },
+
+          details: {
+            type: Schema.Types.Mixed,
+          },
+        },
+      },
+    ],
+
+    // ==========================================
+    // RECIPIENT
+    // ==========================================
+
     recipient: {
       userId: {
         type: Schema.Types.ObjectId,
         ref: "User",
+        default: null,
       },
+
       vendorId: {
         type: Schema.Types.ObjectId,
         ref: "Vendor",
+        default: null,
       },
-      phoneNumber: String,
-      email: String,
-      pushToken: String,
-      telegramChatId: String,
+
+      phoneNumber: {
+        type: String,
+        default: null,
+      },
+
+      email: {
+        type: String,
+        default: null,
+      },
+
+      pushToken: {
+        type: String,
+        default: null,
+      },
+
+      telegramChatId: {
+        type: String,
+        default: null,
+      },
+
+      whatsappNumber: {
+        type: String,
+        default: null,
+      },
     },
 
-    /**
-     * Template Name
-     * Examples: payment_success, booking_confirmed, otp, withdrawal_success
-     */
+    // ==========================================
+    // TEMPLATE
+    // ==========================================
+
     template: {
       type: String,
       required: true,
       index: true,
+      trim: true,
     },
 
-    /**
-     * Content and Template Data
-     */
+    // ==========================================
+    // CONTENT
+    // ==========================================
+
     content: {
-      subject: String, // For emails
-      body: String, // For push and in-app
+      subject: {
+        type: String,
+        default: null,
+      },
+
+      body: {
+        type: String,
+        default: null,
+      },
+
       templateData: {
         type: Schema.Types.Mixed,
         default: {},
       },
-      attachments: [
-        {
-          filename: String,
-          url: String,
-          mimeType: String,
-          size: Number,
-        },
-      ],
     },
 
-    /**
-     * Status - State machine
-     */
+    // ==========================================
+    // SOURCE
+    // ==========================================
+
+    source: {
+      type: String,
+      default: "system",
+      index: true,
+      trim: true,
+    },
+
+    sourceId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+
+    // ==========================================
+    // REQUEST / TRACE
+    // ==========================================
+
+    requestId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+
+    // ==========================================
+    // PRIORITY
+    // ==========================================
+
+    priority: {
+      type: Number,
+      enum: VALID_PRIORITIES,
+      default: 5,
+      index: true,
+    },
+
+    // ==========================================
+    // STATUS
+    // ==========================================
+
     status: {
       type: String,
       enum: VALID_STATUSES,
@@ -121,373 +342,387 @@ const notificationSchema = new Schema(
       index: true,
     },
 
-    /**
-     * Retry Configuration
-     */
+    // ==========================================
+    // SUCCESS
+    // ==========================================
+
+    success: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    // ==========================================
+    // RETRY
+    // ==========================================
+
     attempts: {
       type: Number,
       default: 0,
       min: 0,
     },
+
     maxAttempts: {
       type: Number,
-      default: 5,
-      min: 1,
-      max: 20,
-    },
-    lastAttempt: Date,
-    nextRetry: Date,
-
-    /**
-     * Processing Results
-     */
-    success: {
-      type: Boolean,
-      default: false,
-    },
-    error: {
-      code: String,
-      message: String,
-      details: Schema.Types.Mixed,
-    },
-    response: {
-      providerMessageId: String,
-      requestId: String,
-      deliveryId: String,
-      accepted: Boolean,
-      status: String,
-      timestamp: Date,
-      latency: Number,
-      provider: String,
-      sid: String,
-      messageId: String,
-      msgId: String,
+      default: 3,
+      min: 0,
     },
 
-    /**
-     * Failure History - Limited to prevent document bloat
-     */
+    nextRetry: {
+      type: Date,
+      default: null,
+    },
+
+    // ==========================================
+    // SCHEDULING
+    // ==========================================
+
+    scheduledAt: {
+      type: Date,
+      default: Date.now,
+      index: true,
+    },
+
+    expiresAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    // ==========================================
+    // DELIVERY INFORMATION
+    // ==========================================
+
+    delivery: {
+      provider: {
+        type: String,
+        default: null,
+      },
+
+      providerMessageId: {
+        type: String,
+        default: null,
+      },
+
+      deliveredAt: {
+        type: Date,
+        default: null,
+      },
+
+      deliveredVia: {
+        type: String,
+        default: null,
+      },
+    },
+
+    // ==========================================
+    // FAILURE HISTORY
+    // ==========================================
+
     failureHistory: [
       {
         attempt: {
           type: Number,
-          required: true,
         },
-        error: {
-          code: String,
-          message: String,
-          details: Schema.Types.Mixed,
+
+        channel: {
+          type: String,
+          default: null,
         },
-        timestamp: {
+
+        errorCode: {
+          type: String,
+          default: null,
+        },
+
+        errorMessage: {
+          type: String,
+          default: null,
+        },
+
+        occurredAt: {
           type: Date,
           default: Date.now,
         },
       },
     ],
 
-    /**
-     * Performance Metrics
-     */
-    performance: {
-      queuedAt: Date,
-      processingStartedAt: Date,
-      processingEndedAt: Date,
-      totalProcessingTime: Number, // milliseconds
-      providerLatency: Number, // milliseconds
-    },
+    // ==========================================
+    // TAGS
+    // ==========================================
 
-    /**
-     * Delivery Tracking
-     */
-    delivery: {
-      sentAt: Date,
-      deliveredAt: Date,
-      readAt: Date,
-      attempts: Number,
-      providerLatency: Number,
-      deliveredVia: String,
-    },
-
-    /**
-     * Metadata and Context
-     */
-    requestId: {
-      type: String,
-      // index: true, // REMOVED - Will be defined in schema.index() below
-    },
-    source: {
-      type: String,
-      enum: VALID_SOURCES,
-      default: "system",
+    tags: {
+      type: [String],
+      default: [],
       index: true,
     },
-    sourceId: {
-      type: String,
-      index: true,
-    },
+
+    // ==========================================
+    // IDEMPOTENCY
+    // ==========================================
+
     /**
-     * Business-level idempotency key.
+     * IMPORTANT:
      *
-     * Identifies one logical notification.
+     * Use ONE idempotency key per business event.
      *
-     * Examples:
+     * Correct:
      *
-     * booking:<bookingId>:created:vendor:sms
-     * booking:<bookingId>:cancelled:vendor:sms
-     * booking:<bookingId>:self-created:vendor:sms
+     * booking:123:created:vendor
      *
-     * This prevents duplicate Notification documents when the
-     * same business event is processed more than once.
+     * Incorrect:
+     *
+     * booking:123:created:vendor:sms
+     * booking:123:created:vendor:push
+     *
+     * SMS/PUSH/WhatsApp are fallback attempts for
+     * the same logical notification.
      */
     idempotencyKey: {
       type: String,
       required: true,
+      unique: true,
+      index: true,
       trim: true,
     },
 
-    /**
-     * Priority - Higher number = higher priority
-     */
-    priority: {
-      type: Number,
-      default: 5,
-      min: 1,
-      max: 10,
-      index: true,
-    },
+    // ==========================================
+    // TIMESTAMPS
+    // ==========================================
 
-    /**
-     * Scheduling
-     */
-    scheduledAt: {
+    createdAt: {
       type: Date,
       default: Date.now,
       index: true,
     },
-    expiresAt: {
+
+    updatedAt: {
       type: Date,
-      // index: true, // REMOVED - Will be defined in schema.index() below
+      default: Date.now,
     },
 
-    /**
-     * Audit Trail
-     */
     queuedAt: {
       type: Date,
       default: null,
     },
-    sentAt: Date,
-    processedAt: Date,
-    cancelledAt: Date,
-    failureReason: {
-      type: String,
-      enum: [
-        "permanent_error",
-        "retries_exhausted",
-        "timeout",
-        "cancelled",
-        "expired",
-        "invalid_type",
-        "retry_scheduled",
-      ],
+
+    processingStartedAt: {
+      type: Date,
+      default: null,
     },
 
-    /**
-     * Tags for filtering and analytics
-     */
-    tags: [
-      {
-        type: String,
-        index: true,
-      },
-    ],
+    sentAt: {
+      type: Date,
+      default: null,
+    },
+
+    failedAt: {
+      type: Date,
+      default: null,
+    },
+
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
-    timestamps: {
-      createdAt: "createdAt",
-      updatedAt: "updatedAt",
-    },
-    versionKey: "__v",
-    optimisticConcurrency: true,
-    collation: { locale: "en", strength: 2 },
+    timestamps: false,
+
+    strict: true,
+
+    minimize: false,
   },
 );
 
 // ============================================
-// INDEXES - All indexes defined here
+// INDEXES
 // ============================================
 
-// Queue processing - priority queue
 notificationSchema.index({
   status: 1,
-  priority: -1,
+  priority: 1,
   scheduledAt: 1,
 });
 
-// Retry processing - scheduled retries
-notificationSchema.index(
-  {
-    status: 1,
-    nextRetry: 1,
-  },
-  {
-    partialFilterExpression: {
-      status: "retrying",
-      nextRetry: { $exists: true },
-    },
-  },
-);
-notificationSchema.index(
-  {
-    idempotencyKey: 1,
-  },
-  {
-    unique: true,
-    name: "unique_notification_idempotency_key",
-  },
-);
-// User history queries
 notificationSchema.index({
   userId: 1,
   createdAt: -1,
 });
 
-// Vendor history queries
 notificationSchema.index({
   vendorId: 1,
   createdAt: -1,
 });
 
-// Source tracking
 notificationSchema.index({
   source: 1,
   sourceId: 1,
 });
 
-// Request tracking
-notificationSchema.index({
-  requestId: 1,
-});
-
-// Type and template analytics
 notificationSchema.index({
   type: 1,
   template: 1,
   status: 1,
 });
 
-// Composite recipient lookup
 notificationSchema.index({
-  "recipient.phoneNumber": 1,
-  "recipient.email": 1,
-});
-
-// Recipient userId lookup
-notificationSchema.index({
-  "recipient.userId": 1,
-});
-
-// Recipient vendorId lookup
-notificationSchema.index({
-  "recipient.vendorId": 1,
-});
-
-// Status and createdAt for cleanup
-notificationSchema.index({
+  type: 1,
+  channel: 1,
   status: 1,
-  createdAt: 1,
 });
 
-// Expiry cleanup - Only index if expiresAt exists
-notificationSchema.index(
-  { expiresAt: 1 },
-  {
-    partialFilterExpression: {
-      expiresAt: { $exists: true },
-    },
-  },
-);
-
-// TTL index for auto-deletion after 90 days
-// Only applies to terminal states (sent, failed, cancelled)
-notificationSchema.index(
-  { createdAt: 1 },
-  {
-    expireAfterSeconds: NOTIFICATION_TTL_DAYS * 24 * 60 * 60,
-    partialFilterExpression: {
-      status: { $in: ["sent", "failed", "cancelled"] },
-    },
-  },
-);
-
-// ============================================
-// PRE-VALIDATE HOOK - Normalize Types
-// ============================================
-
-notificationSchema.pre("validate", function (next) {
-  // Normalize type to uppercase
-  if (this.type) {
-    this.type = this.type.toUpperCase();
-  }
-
-  // Ensure at least one owner is set
-  if (!this.userId && !this.vendorId && !this.recipient?.userId && !this.recipient?.vendorId) {
-    return next(new Error("At least one owner (userId, vendorId, or recipient) is required"));
-  }
-
-  // Validate retry configuration
-  if (this.attempts > this.maxAttempts) {
-    return next(
-      new Error(`Attempts (${this.attempts}) cannot exceed maxAttempts (${this.maxAttempts})`),
-    );
-  }
-
-  next();
-});
-
-// ============================================
-// PRE-SAVE HOOK - Auto-set fields
-// ============================================
-
-notificationSchema.pre("save", function (next) {
-  // Auto-set queuedAt if status is queued and not set
-  if (this.status === "queued" && !this.queuedAt) {
-    this.queuedAt = new Date();
-  }
-
-  // Auto-set performance queuedAt
-  if (!this.performance) {
-    this.performance = {};
-  }
-
-  // Limit failureHistory to prevent document bloat
-  if (this.failureHistory && this.failureHistory.length > MAX_FAILURE_HISTORY) {
-    this.failureHistory = this.failureHistory.slice(-MAX_FAILURE_HISTORY);
-  }
-
-  // Ensure nextRetry is valid if status is retrying
-  if (this.status === "retrying" && this.nextRetry && this.nextRetry < new Date()) {
-    this.nextRetry = new Date(Date.now() + 60000); // Set to 1 minute from now
-  }
-
-  next();
+notificationSchema.index({
+  channel: 1,
+  status: 1,
+  scheduledAt: 1,
 });
 
 // ============================================
 // INSTANCE METHODS
 // ============================================
 
+/**
+ * Get the effective channel policy.
+ *
+ * Legacy notification:
+ *
+ * type = SMS
+ * -> SMS only
+ *
+ * type = PUSH
+ * -> PUSH only
+ *
+ * New business notification:
+ *
+ * type = BOOKING
+ * channelPolicy =
+ * PUSH -> WHATSAPP -> SMS
+ */
+notificationSchema.methods.getChannelPolicy = function () {
+  if (this.channelPolicy?.channels?.length) {
+    return {
+      channels: this.channelPolicy.channels,
+      fallback: this.channelPolicy.fallback !== false,
+    };
+  }
+
+  // Backward compatibility.
+  if (VALID_CHANNELS.includes(this.type)) {
+    return {
+      channels: [this.type],
+      fallback: false,
+    };
+  }
+
+  // Future business-event support.
+  return {
+    channels: DEFAULT_CHANNEL_POLICIES[this.type] || ["PUSH"],
+    fallback: true,
+  };
+};
+
+/**
+ * Get the channel currently being attempted.
+ */
+notificationSchema.methods.getCurrentChannel = function () {
+  const policy = this.getChannelPolicy();
+
+  return policy.channels[this.channelIndex] || null;
+};
+
+/**
+ * Move to next fallback channel.
+ *
+ * Returns:
+ *
+ * true  = fallback available
+ * false = no fallback available
+ */
+notificationSchema.methods.moveToNextChannel = function () {
+  const policy = this.getChannelPolicy();
+
+  if (!policy.fallback) {
+    return false;
+  }
+
+  const nextIndex = this.channelIndex + 1;
+
+  if (nextIndex >= policy.channels.length) {
+    return false;
+  }
+
+  this.channelIndex = nextIndex;
+
+  this.channel = policy.channels[nextIndex];
+
+  this.status = "queued";
+
+  this.success = false;
+
+  this.nextRetry = null;
+
+  this.updatedAt = new Date();
+
+  return true;
+};
+
+/**
+ * Record provider/channel attempt.
+ */
+notificationSchema.methods.recordDeliveryAttempt = function ({
+  channel,
+  status,
+  attempt,
+  startedAt,
+  completedAt,
+  provider,
+  providerMessageId,
+  error,
+}) {
+  this.deliveryAttempts.push({
+    channel,
+    status,
+    attempt,
+    startedAt,
+    completedAt,
+    provider,
+    providerMessageId,
+
+    error: error
+      ? {
+          code: error.code || "UNKNOWN_ERROR",
+
+          message: error.message || "Unknown notification provider error",
+
+          details: error.details || {},
+        }
+      : undefined,
+  });
+
+  return this;
+};
+
+/**
+ * Mark notification queued.
+ */
 notificationSchema.methods.markQueued = function () {
   const now = new Date();
 
-  this.status = "queued";
-  this.queuedAt = now;
-
-  if (!this.performance) {
-    this.performance = {};
+  // Determine initial channel.
+  if (!this.channel) {
+    if (this.channelPolicy?.channels?.length) {
+      this.channel =
+        this.channelPolicy.channels[this.channelIndex] || this.channelPolicy.channels[0];
+    } else if (VALID_CHANNELS.includes(this.type)) {
+      // Backward compatibility.
+      this.channel = this.type;
+    }
   }
 
-  this.performance.queuedAt = now;
+  this.status = "queued";
+
+  this.queuedAt = now;
 
   this.updatedAt = now;
 
@@ -495,20 +730,14 @@ notificationSchema.methods.markQueued = function () {
 };
 
 /**
- * Mark notification as processing
+ * Mark notification processing.
  */
 notificationSchema.methods.markProcessing = function () {
   const now = new Date();
 
-  if (!this.performance) {
-    this.performance = {};
-  }
-
   this.status = "processing";
-  this.lastAttempt = now;
-  this.attempts += 1;
 
-  this.performance.processingStartedAt = now;
+  this.processingStartedAt = now;
 
   this.updatedAt = now;
 
@@ -516,302 +745,140 @@ notificationSchema.methods.markProcessing = function () {
 };
 
 /**
- * Mark notification as sent
+ * Mark notification sent.
  */
-notificationSchema.methods.markSent = function (providerResponse) {
-  this.status = "sent";
-  this.success = true;
-  this.sentAt = new Date();
-  this.processedAt = new Date();
-  this.performance.processingEndedAt = new Date();
-  this.performance.totalProcessingTime =
-    this.performance.processingEndedAt - this.performance.processingStartedAt;
-
-  if (providerResponse) {
-    this.response = providerResponse;
-    this.delivery = {
-      sentAt: new Date(),
-      attempts: this.attempts,
-      providerLatency: this.performance.totalProcessingTime,
-      deliveredVia: this.type,
-      ...providerResponse,
-    };
-  }
-
-  this.updatedAt = new Date();
-  return this;
-};
-
-/**
- * Mark notification as failed
- */
-notificationSchema.methods.markFailed = function (error, reason = "permanent_error") {
-  this.status = "failed";
-  this.success = false;
-  this.processedAt = new Date();
-  this.performance.processingEndedAt = new Date();
-  this.failureReason = reason;
-
-  if (error) {
-    this.error = {
-      code: error.code || "UNKNOWN_ERROR",
-      message: error.message || "Unknown error",
-      details: error.details || {},
-    };
-  }
-
-  // Add to failure history
-  this.failureHistory.push({
-    attempt: this.attempts,
-    error: this.error,
-    timestamp: new Date(),
-  });
-
-  this.updatedAt = new Date();
-  return this;
-};
-
-/**
- * Mark notification as retrying
- */
-notificationSchema.methods.markRetrying = function (error, nextRetryDelay) {
-  this.status = "retrying";
-  this.success = false;
-  this.processedAt = new Date();
-  this.performance.processingEndedAt = new Date();
-
-  if (error) {
-    this.error = {
-      code: error.code || "RETRYABLE_ERROR",
-      message: error.message || "Retryable error occurred",
-      details: error.details || {},
-    };
-  }
-
-  this.nextRetry = new Date(Date.now() + nextRetryDelay);
-
-  // Add to failure history
-  this.failureHistory.push({
-    attempt: this.attempts,
-    error: this.error,
-    timestamp: new Date(),
-  });
-
-  this.updatedAt = new Date();
-  return this;
-};
-
-/**
- * Mark notification as cancelled
- */
-notificationSchema.methods.markCancelled = function () {
-  this.status = "cancelled";
-  this.cancelledAt = new Date();
-  this.processedAt = new Date();
-  this.failureReason = "cancelled";
-  this.updatedAt = new Date();
-  return this;
-};
-
-/**
- * Check if notification is in terminal state
- */
-notificationSchema.methods.isTerminal = function () {
-  return ["sent", "failed", "cancelled"].includes(this.status);
-};
-
-/**
- * Check if notification is pending
- */
-notificationSchema.methods.isPending = function () {
-  return ["queued", "processing", "retrying"].includes(this.status);
-};
-
-/**
- * Check if notification is retryable
- */
-notificationSchema.methods.isRetryable = function () {
-  return (
-    this.status === "failed" &&
-    this.attempts < this.maxAttempts &&
-    (!this.expiresAt || this.expiresAt > new Date())
-  );
-};
-
-/**
- * Check if notification is expired
- */
-notificationSchema.methods.isExpired = function () {
-  if (!this.expiresAt) return false;
-  return new Date() > this.expiresAt;
-};
-
-// ============================================
-// STATIC METHODS
-// ============================================
-
-/**
- * Get pending notifications ready for processing
- */
-notificationSchema.statics.getPendingNotifications = function (limit = 100) {
+notificationSchema.methods.markSent = function ({
+  provider = null,
+  providerMessageId = null,
+  deliveredVia = null,
+} = {}) {
   const now = new Date();
 
-  return this.find({
-    status: { $in: ["queued", "retrying"] },
-    scheduledAt: { $lte: now },
-    $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: now } }],
-  })
-    .sort({ priority: -1, scheduledAt: 1 })
-    .limit(limit)
-    .lean();
+  this.status = "sent";
+
+  this.success = true;
+
+  this.sentAt = now;
+
+  this.updatedAt = now;
+
+  this.delivery.provider = provider;
+
+  this.delivery.providerMessageId = providerMessageId;
+
+  this.delivery.deliveredAt = now;
+
+  this.delivery.deliveredVia = deliveredVia || this.channel || this.type;
+
+  return this;
 };
 
 /**
- * Get notification statistics
+ * Mark notification failed.
  */
-notificationSchema.statics.getStats = function (filter = {}) {
-  const match = { ...filter };
+notificationSchema.methods.markFailed = function ({ errorCode = null, errorMessage = null } = {}) {
+  const now = new Date();
 
-  if (filter.startDate || filter.endDate) {
-    match.createdAt = {};
-    if (filter.startDate) match.createdAt.$gte = new Date(filter.startDate);
-    if (filter.endDate) match.createdAt.$lte = new Date(filter.endDate);
-    delete filter.startDate;
-    delete filter.endDate;
+  this.status = "failed";
+
+  this.success = false;
+
+  this.failedAt = now;
+
+  this.updatedAt = now;
+
+  if (errorCode || errorMessage) {
+    this.failureHistory.push({
+      attempt: this.attempts,
+
+      channel: this.channel || this.type,
+
+      errorCode,
+
+      errorMessage,
+
+      occurredAt: now,
+    });
   }
 
-  return this.aggregate([
-    { $match: match },
-    {
-      $facet: {
-        statusCounts: [
-          {
-            $group: {
-              _id: "$status",
-              count: { $sum: 1 },
-            },
-          },
-        ],
-        typeCounts: [
-          {
-            $group: {
-              _id: "$type",
-              count: { $sum: 1 },
-            },
-          },
-        ],
-        sourceCounts: [
-          {
-            $group: {
-              _id: "$source",
-              count: { $sum: 1 },
-            },
-          },
-        ],
-        performance: [
-          {
-            $group: {
-              _id: null,
-              avgProcessingTime: { $avg: "$performance.totalProcessingTime" },
-              maxProcessingTime: { $max: "$performance.totalProcessingTime" },
-              totalAttempts: { $sum: "$attempts" },
-              avgAttempts: { $avg: "$attempts" },
-            },
-          },
-        ],
-        total: [
-          {
-            $group: {
-              _id: null,
-              total: { $sum: 1 },
-            },
-          },
-        ],
-        successRate: [
-          {
-            $group: {
-              _id: null,
-              successful: {
-                $sum: { $cond: [{ $eq: ["$status", "sent"] }, 1, 0] },
-              },
-              failed: {
-                $sum: { $cond: [{ $eq: ["$status", "failed"] }, 1, 0] },
-              },
-              retrying: {
-                $sum: { $cond: [{ $eq: ["$status", "retrying"] }, 1, 0] },
-              },
-            },
-          },
-        ],
-      },
-    },
-  ]);
+  return this;
 };
 
 /**
- * Clean up old notifications
+ * Mark notification cancelled.
  */
-notificationSchema.statics.cleanupOldNotifications = function (daysToKeep = 30) {
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+notificationSchema.methods.markCancelled = function () {
+  const now = new Date();
 
-  return this.deleteMany({
-    status: { $in: ["sent", "failed", "cancelled"] },
-    createdAt: { $lt: cutoffDate },
-  });
+  this.status = "cancelled";
+
+  this.success = false;
+
+  this.cancelledAt = now;
+
+  this.updatedAt = now;
+
+  return this;
 };
 
 // ============================================
-// VIRTUAL PROPERTIES
+// PRE VALIDATE
 // ============================================
 
-notificationSchema.virtual("displayName").get(function () {
-  const name = this.recipient?.name || this.recipient?.phoneNumber || this.recipient?.email;
-  return name || "Unknown";
-});
+notificationSchema.pre("validate", function (next) {
+  // Validate retry configuration.
+  if (this.attempts > this.maxAttempts) {
+    return next(
+      new Error(`Attempts (${this.attempts}) cannot exceed maxAttempts (${this.maxAttempts})`),
+    );
+  }
 
-notificationSchema.virtual("isQueued").get(function () {
-  return this.status === "queued";
-});
+  // Existing notifications:
+  //
+  // type = SMS
+  // type = PUSH
+  //
+  // automatically get the matching channel.
+  if (!this.channel && VALID_CHANNELS.includes(this.type)) {
+    this.channel = this.type;
+  }
 
-notificationSchema.virtual("isProcessing").get(function () {
-  return this.status === "processing";
-});
+  // Validate channel policy.
+  if (this.channelPolicy?.channels?.length) {
+    if (this.channelIndex >= this.channelPolicy.channels.length) {
+      return next(new Error(`channelIndex (${this.channelIndex}) is outside channelPolicy range`));
+    }
 
-notificationSchema.virtual("isRetrying").get(function () {
-  return this.status === "retrying";
-});
+    if (!this.channel) {
+      this.channel =
+        this.channelPolicy.channels[this.channelIndex] || this.channelPolicy.channels[0];
+    }
+  }
 
-notificationSchema.virtual("isSent").get(function () {
-  return this.status === "sent";
-});
-
-notificationSchema.virtual("isFailed").get(function () {
-  return this.status === "failed";
-});
-
-notificationSchema.virtual("isCancelled").get(function () {
-  return this.status === "cancelled";
-});
-
-// ============================================
-// JSON TRANSFORM
-// ============================================
-
-notificationSchema.set("toJSON", {
-  virtuals: true,
-  transform: function (doc, ret) {
-    delete ret.__v;
-    return ret;
-  },
-});
-
-notificationSchema.set("toObject", {
-  virtuals: true,
+  next();
 });
 
 // ============================================
-// EXPORT
+// PRE SAVE
 // ============================================
 
-module.exports = mongoose.model("Notification", notificationSchema);
+notificationSchema.pre("save", function (next) {
+  this.updatedAt = new Date();
+
+  next();
+});
+
+// ============================================
+// MODEL
+// ============================================
+
+const Notification = mongoose.model("Notification", notificationSchema);
+
+// Export constants for worker/dispatcher.
+Notification.VALID_CHANNELS = VALID_CHANNELS;
+
+Notification.VALID_DELIVERY_STATUSES = VALID_DELIVERY_STATUSES;
+
+Notification.DEFAULT_CHANNEL_POLICIES = DEFAULT_CHANNEL_POLICIES;
+
+module.exports = Notification;

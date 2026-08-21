@@ -10,6 +10,7 @@ const CacheService = require("./CacheService");
 const { normalizeDateIST } = require("../utils/dateUtils");
 const redisKeys = require("../utils/redisKeys");
 const { BookingLogger } = require("../logger/index");
+const NotificationOutbox = require("../../models/notificationOutbox");
 /**
  * BookingService - Core business logic for all booking operations
  * Follows Single Responsibility Principle
@@ -245,6 +246,28 @@ class BookingService {
                 }),
               ]);
 
+              await this.createNotificationOutbox({
+                eventType: "BOOKING_CREATED",
+
+                booking: createdBooking,
+
+                userId: user._id,
+
+                vendorId: vendor._id,
+
+                payload: {
+                  requestId,
+
+                  type,
+
+                  pincode,
+
+                  bookingDate: normalizedBookingDate,
+                },
+
+                session,
+              });
+
               /**
                * ==================================================
                * TEST-ONLY ROLLBACK INJECTION
@@ -321,25 +344,25 @@ class BookingService {
        * an already successful booking.
        */
 
-      NotificationService.bookingCreated({
-        booking: createdBooking,
-        user,
-        vendor,
-        requestId,
-      }).catch((err) => {
-        BookingLogger.error(
-          {
-            event: "BOOKING_NOTIFICATION_QUEUE_FAILED",
-            bookingId: createdBooking?._id,
-            userId,
-            vendorId,
-            normalizedBookingDate,
-            requestId,
-            error: err.message,
-          },
-          "Failed to queue booking notifications",
-        );
-      });
+      // NotificationService.bookingCreated({
+      //   booking: createdBooking,
+      //   user,
+      //   vendor,
+      //   requestId,
+      // }).catch((err) => {
+      //   BookingLogger.error(
+      //     {
+      //       event: "BOOKING_NOTIFICATION_QUEUE_FAILED",
+      //       bookingId: createdBooking?._id,
+      //       userId,
+      //       vendorId,
+      //       normalizedBookingDate,
+      //       requestId,
+      //       error: err.message,
+      //     },
+      //     "Failed to queue booking notifications",
+      //   );
+      // });
 
       /**
        * ==========================================================
@@ -779,6 +802,27 @@ class BookingService {
                 }),
               ]);
 
+              await this.createNotificationOutbox({
+                eventType: "BOOKING_CREATED",
+
+                booking: createdBooking,
+
+                userId: vendorUser._id,
+
+                vendorId: vendor._id,
+
+                payload: {
+                  requestId,
+
+                  type,
+
+                  pincode,
+
+                  bookingDate: normalizedBookingDate,
+                },
+
+                session,
+              });
               /**
                * ==================================================
                * TEST-ONLY ROLLBACK INJECTION
@@ -887,31 +931,31 @@ class BookingService {
        * already successful booking.
        */
 
-      NotificationService.bookingCreated({
-        booking: createdBooking,
-        user: vendorUser,
-        vendor,
-        requestId,
-      }).catch((err) => {
-        BookingLogger.error(
-          {
-            event: "VENDOR_BOOKING_NOTIFICATION_QUEUE_FAILED",
+      // NotificationService.bookingCreated({
+      //   booking: createdBooking,
+      //   user: vendorUser,
+      //   vendor,
+      //   requestId,
+      // }).catch((err) => {
+      //   BookingLogger.error(
+      //     {
+      //       event: "VENDOR_BOOKING_NOTIFICATION_QUEUE_FAILED",
 
-            bookingId: createdBooking?._id,
+      //       bookingId: createdBooking?._id,
 
-            userId,
-            vendorId,
+      //       userId,
+      //       vendorId,
 
-            normalizedBookingDate,
+      //       normalizedBookingDate,
 
-            requestId,
+      //       requestId,
 
-            error: err.message,
-          },
+      //       error: err.message,
+      //     },
 
-          "Failed to queue vendor booking notifications",
-        );
-      });
+      //     "Failed to queue vendor booking notifications",
+      //   );
+      // });
 
       /**
        * ==========================================================
@@ -1287,6 +1331,7 @@ class BookingService {
             "shareBy",
             "completedVendor",
             "status",
+            "fcmToken",
           ].join(" "),
         )
         .lean()
@@ -1309,6 +1354,7 @@ class BookingService {
             "shareBy",
             "completed",
             "status",
+            "fcmToken",
           ].join(" "),
         )
         .lean()
@@ -1396,6 +1442,7 @@ class BookingService {
             "shareBy",
             "completedVendor",
             "status",
+            "fcmToken",
           ].join(" "),
         )
         .lean()
@@ -1418,6 +1465,7 @@ class BookingService {
             "shareBy",
             "completed",
             "status",
+            "fcmToken",
           ].join(" "),
         )
         .lean()
@@ -1474,6 +1522,61 @@ class BookingService {
 
       vendorUser,
     };
+  }
+
+  static async createNotificationOutbox({
+    eventType,
+    booking,
+    userId = null,
+    vendorId = null,
+    payload = {},
+    session,
+  }) {
+    if (!booking?._id) {
+      throw new Error("Notification outbox requires bookingId");
+    }
+
+    if (!session) {
+      throw new Error("Notification outbox requires MongoDB session");
+    }
+
+    const [outbox] = await NotificationOutbox.create(
+      [
+        {
+          eventType,
+
+          bookingId: booking._id,
+
+          userId,
+          vendorId,
+
+          payload,
+
+          status: "PENDING",
+
+          attempts: 0,
+
+          availableAt: new Date(),
+        },
+      ],
+      {
+        session,
+      },
+    );
+
+    BookingLogger.debug(
+      {
+        event: "NOTIFICATION_OUTBOX_CREATED",
+        outboxId: outbox._id,
+        eventType,
+        bookingId: booking._id,
+        userId,
+        vendorId,
+      },
+      "Notification outbox entry created",
+    );
+
+    return outbox;
   }
 
   /**
@@ -1798,14 +1901,18 @@ class BookingService {
 
     try {
       await session.withTransaction(async () => {
-        /**
-         * Load booking
-         */
+        // ========================================================
+        // LOAD BOOKING
+        // ========================================================
+
         booking = await this.loadBookingForCancel(bookingId, entityType, session);
+
         this.assertBookingCustomerOwnership(booking, authenticatedCustomerId);
-        /**
-         * Validation
-         */
+
+        // ========================================================
+        // VALIDATION
+        // ========================================================
+
         if (booking.orderCompleted) {
           throw ApiError.badRequest("You can't cancel this order. This is already completed");
         }
@@ -1814,9 +1921,10 @@ class BookingService {
           throw ApiError.badRequest("This booking is already cancelled");
         }
 
-        /**
-         * Prepare notification data
-         */
+        // ========================================================
+        // PREPARE NOTIFICATION DATA
+        // ========================================================
+
         const bookingDateObj = new Date(booking.bookingDate);
 
         formattedDate =
@@ -1826,14 +1934,16 @@ class BookingService {
 
         userName = booking.userId?.name || "User";
 
-        /**
-         * Mark booking cancelled
-         */
+        // ========================================================
+        // MARK BOOKING CANCELLED
+        // ========================================================
+
         await this.markBookingCancelled(bookingId, session);
 
-        /**
-         * Update accounting + referral in parallel
-         */
+        // ========================================================
+        // ACCOUNTING + REFERRAL
+        // ========================================================
+
         const tasks = [];
 
         if (entityType === "user") {
@@ -1845,9 +1955,13 @@ class BookingService {
         tasks.push(
           this.updateReferralForBooking({
             entity: booking.userId,
+
             entityType: entityType === "user" ? "user" : "vendor",
+
             role: "customer",
+
             action: "cancel",
+
             session,
           }),
         );
@@ -1855,16 +1969,50 @@ class BookingService {
         tasks.push(
           this.updateReferralForBooking({
             entity: booking.vendorId,
+
             entityType: "vendor",
+
             role: "serviceProvider",
+
             action: "cancel",
+
             session,
           }),
         );
+
         await Promise.all(tasks);
 
-        // TEST-ONLY cancellation transaction rollback injection.
-        // Impossible to activate in production.
+        // ========================================================
+        // NOTIFICATION OUTBOX
+        // ========================================================
+
+        await NotificationOutbox.create(
+          [
+            {
+              eventType: "BOOKING_CANCELLED",
+
+              bookingId: booking._id,
+
+              userId: booking.userId,
+
+              vendorId: booking.vendorId,
+
+              payload: {
+                formattedDate,
+
+                requestId: requestId || null,
+              },
+            },
+          ],
+          {
+            session,
+          },
+        );
+
+        // ========================================================
+        // TEST-ONLY ROLLBACK
+        // ========================================================
+
         if (
           process.env.NODE_ENV === "development" &&
           process.env.ALLOW_BOOKING_ROLLBACK_TEST === "1" &&
@@ -1874,70 +2022,67 @@ class BookingService {
         }
       });
 
+      // ==========================================================
+      // CACHE INVALIDATION
+      // ==========================================================
+
       const bookingDate = normalizeDateIST(booking.bookingDate);
 
       const cacheDate = bookingDate.toISOString().slice(0, 10);
+
       try {
         await Promise.all([
           CacheService.invalidateTag("vendors"),
+
           CacheService.invalidateTag("availability"),
+
           CacheService.invalidateTag(`availability:${cacheDate}`),
         ]);
       } catch (error) {
         BookingLogger.error(
           {
             event: "CACHE_INVALIDATION_FAILED",
+
             bookingId,
+
             bookingDate: cacheDate,
+
             err: error,
           },
+
           "Failed to invalidate availability cache",
         );
       }
-      /**
-       * Notification should never be inside transaction
-       */
-      NotificationService.bookingCancelled({
-        booking,
-        user: booking.userId,
-        vendor: booking.vendorId,
-        formattedDate,
-        requestId,
-      }).catch((err) => {
-        /**
-         * Defensive catch.
-         *
-         * bookingCancelled() currently handles its own queue errors,
-         * but keeping this protects BookingService if the implementation
-         * changes later or an unexpected exception escapes.
-         */
-        BookingLogger.error(
-          {
-            event: "BOOKING_CANCEL_NOTIFICATION_UNEXPECTED_ERROR",
-            bookingId,
-            entityType,
-            requestId,
-            error: err.message,
-            stack: err.stack,
-          },
-          "Unexpected cancellation notification error",
-        );
-      });
+
+      // ==========================================================
+      // RESPONSE
+      // ==========================================================
 
       return {
         message: "Order Cancelled successfully",
       };
     } catch (error) {
-      BookingLogger.error("Booking cancellation failed", {
-        event: "BOOKING_CANCEL_FAILED",
-        bookingId,
-        entityType,
-        bookingDate: booking?.bookingDate,
-        userId: booking?.userId?._id,
-        vendorId: booking?.vendorId?._id,
-        error: error.message,
-        stack: error.stack,
-      });
+      BookingLogger.error(
+        {
+          event: "BOOKING_CANCEL_FAILED",
+
+          bookingId,
+
+          entityType,
+
+          bookingDate: booking?.bookingDate,
+
+          userId: booking?.userId?._id,
+
+          vendorId: booking?.vendorId?._id,
+
+          error: error.message,
+
+          stack: error.stack,
+        },
+
+        "Booking cancellation failed",
+      );
 
       throw error;
     } finally {

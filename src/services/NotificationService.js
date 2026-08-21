@@ -2,41 +2,15 @@
 
 const Notification = require("../../models/notification");
 const { addNotificationJob } = require("../queues/notification.queue");
-
 const { NotificationLogger } = require("../logger/index");
-/**
- * NotificationService
- *
- * Responsibilities:
- *
- * 1. Create notification records in MongoDB
- * 2. Push notification jobs to BullMQ
- * 3. Provide channel-specific helpers
- * 4. Provide business-level notification orchestration
- *
- * IMPORTANT:
- *
- * NotificationService should normally be called AFTER the main
- * business transaction has committed.
- *
- * Example:
- *
- * MongoDB Transaction
- *      ↓
- * Booking Created
- *      ↓
- * Transaction Commit
- *      ↓
- * NotificationService.bookingCreated()
- *      ↓
- * MongoDB Notification Record
- *      ↓
- * BullMQ / Redis
- *      ↓
- * Notification Worker
- *      ↓
- * Provider
- */
+
+// IMPORTANT:
+// Change this path if notification.policy.js is in another folder.
+const { getNotificationPolicy } = require("./notification/notification.policy");
+
+// ============================================================
+// HELPERS
+// ============================================================
 
 function isDuplicateIdempotencyError(error) {
   return (
@@ -45,11 +19,17 @@ function isDuplicateIdempotencyError(error) {
   );
 }
 
+// ============================================================
+// SERVICE
+// ============================================================
+
 class NotificationService {
+  // ============================================================
+  // GENERIC NOTIFICATION CREATOR
+  // ============================================================
+
   /**
-   * Generic Notification Creator
-   *
-   * This is the central entry point for creating notifications.
+   * Central notification creation method.
    *
    * Flow:
    *
@@ -59,7 +39,16 @@ class NotificationService {
    *        ↓
    * BullMQ
    *        ↓
-   * Worker
+   * Notification Worker
+   *
+   * IMPORTANT:
+   *
+   * This method does NOT send SMS/PUSH/WhatsApp directly.
+   *
+   * It creates ONE logical notification.
+   *
+   * The Worker/Dispatcher is responsible for actually
+   * delivering it through the channel policy.
    */
   static async createNotification({
     type,
@@ -75,6 +64,7 @@ class NotificationService {
     scheduledAt = new Date(),
     expiresAt = null,
     tags = [],
+    channelPolicy = null,
     idempotencyKey,
   }) {
     if (!type) {
@@ -100,9 +90,14 @@ class NotificationService {
     let notification;
 
     try {
+      // ========================================================
+      // CREATE NOTIFICATION
+      // ========================================================
+
       try {
         notification = await Notification.create({
           userId,
+
           vendorId,
 
           type: normalizedType,
@@ -116,6 +111,7 @@ class NotificationService {
           },
 
           source,
+
           sourceId,
 
           requestId,
@@ -123,15 +119,22 @@ class NotificationService {
           priority,
 
           scheduledAt,
+
           expiresAt,
 
           tags,
+
+          channelPolicy,
 
           idempotencyKey: normalizedIdempotencyKey,
 
           status: "created",
         });
       } catch (error) {
+        // ======================================================
+        // IDEMPOTENCY
+        // ======================================================
+
         if (!isDuplicateIdempotencyError(error)) {
           throw error;
         }
@@ -154,23 +157,38 @@ class NotificationService {
 
             requestId,
           },
+
           "Existing notification reused for duplicate business event",
         );
       }
+
+      // ========================================================
+      // TERMINAL STATE
+      // ========================================================
+
       if (notification.status === "sent" || notification.status === "cancelled") {
         NotificationLogger.info(
           {
             event: "NOTIFICATION_ALREADY_TERMINAL",
+
             notificationId: notification._id,
+
             idempotencyKey: normalizedIdempotencyKey,
+
             status: notification.status,
+
             requestId,
           },
+
           "Notification already reached terminal state; skipping enqueue",
         );
 
         return notification;
       }
+
+      // ========================================================
+      // QUEUE
+      // ========================================================
 
       await addNotificationJob(
         {
@@ -183,11 +201,19 @@ class NotificationService {
         },
       );
 
+      // ========================================================
+      // MARK QUEUED
+      // ========================================================
+
       if (notification.status === "created") {
         notification.markQueued();
 
         await notification.save();
       }
+
+      // ========================================================
+      // LOG
+      // ========================================================
 
       NotificationLogger.info(
         {
@@ -199,6 +225,10 @@ class NotificationService {
 
           type: notification.type,
 
+          channel: notification.channel,
+
+          channelPolicy: notification.channelPolicy,
+
           template: notification.template,
 
           source: notification.source,
@@ -206,12 +236,14 @@ class NotificationService {
           sourceId: notification.sourceId,
 
           userId,
+
           vendorId,
 
           requestId,
 
           priority: notification.priority,
         },
+
         "Notification queued successfully",
       );
 
@@ -232,13 +264,16 @@ class NotificationService {
           template,
 
           source,
+
           sourceId,
 
           userId,
+
           vendorId,
 
           requestId,
         },
+
         "Failed to create or queue notification",
       );
 
@@ -247,11 +282,106 @@ class NotificationService {
   }
 
   // ============================================================
+  // BUSINESS NOTIFICATION
+  // ============================================================
+
+  /**
+   * Create ONE logical business notification.
+   *
+   * Policy comes from notification.policy.js.
+   *
+   * Example:
+   *
+   * BOOKING
+   *   ↓
+   * PUSH
+   *   ↓ failure
+   * WHATSAPP
+   *   ↓ failure
+   * SMS
+   */
+  static async createBusinessNotification({
+    type,
+    userId = null,
+    vendorId = null,
+    recipient = {},
+    template,
+    templateData = {},
+    source = "system",
+    sourceId = null,
+    requestId = null,
+    priority = 5,
+    scheduledAt = new Date(),
+    expiresAt = null,
+    tags = [],
+    idempotencyKey,
+    channelPolicy = null,
+  }) {
+    const normalizedType = String(type || "")
+      .trim()
+      .toUpperCase();
+
+    if (!normalizedType) {
+      throw new Error("Business notification type is required");
+    }
+
+    // ==========================================================
+    // USE EXISTING POLICY FILE
+    // ==========================================================
+
+    const policy = channelPolicy || getNotificationPolicy(normalizedType);
+
+    if (!policy || !Array.isArray(policy.channels) || policy.channels.length === 0) {
+      throw new Error(`No delivery policy configured for notification type: ${normalizedType}`);
+    }
+
+    return this.createNotification({
+      type: normalizedType,
+
+      userId,
+
+      vendorId,
+
+      recipient,
+
+      template,
+
+      templateData,
+
+      source,
+
+      sourceId,
+
+      requestId,
+
+      priority,
+
+      scheduledAt,
+
+      expiresAt,
+
+      tags,
+
+      idempotencyKey,
+
+      channelPolicy: {
+        channels: policy.channels,
+
+        fallback: policy.fallback !== false,
+      },
+    });
+  }
+
+  // ============================================================
   // SMS
   // ============================================================
 
   /**
-   * Queue SMS Notification
+   * Legacy/direct SMS helper.
+   *
+   * DO NOT remove this yet.
+   *
+   * Other parts of your application may still use it.
    */
   static async sendSMS({
     userId = null,
@@ -276,6 +406,7 @@ class NotificationService {
       type: "SMS",
 
       userId,
+
       vendorId,
 
       recipient: {
@@ -283,44 +414,48 @@ class NotificationService {
       },
 
       template,
+
       templateData,
 
       source,
+
       sourceId,
+
       requestId,
+
       priority,
+
       scheduledAt,
+
       expiresAt,
+
       tags,
+
       idempotencyKey,
     });
   }
+
   // ============================================================
   // PUSH
   // ============================================================
 
   /**
-   * Queue Push Notification
+   * Legacy/direct PUSH helper.
+   *
+   * DO NOT remove this yet.
    */
   static async sendPush({
     userId = null,
     vendorId = null,
-
     pushToken,
-
     template,
     templateData = {},
-
     source = "system",
     sourceId = null,
-
     requestId = null,
-
     priority = 5,
-
     scheduledAt = new Date(),
     expiresAt = null,
-
     tags = [],
     idempotencyKey,
   }) {
@@ -332,16 +467,19 @@ class NotificationService {
       type: "PUSH",
 
       userId,
+
       vendorId,
 
       recipient: {
-        pushToken,
+        token: pushToken,
       },
 
       template,
+
       templateData,
 
       source,
+
       sourceId,
 
       requestId,
@@ -349,9 +487,11 @@ class NotificationService {
       priority,
 
       scheduledAt,
+
       expiresAt,
 
       tags,
+
       idempotencyKey,
     });
   }
@@ -360,28 +500,18 @@ class NotificationService {
   // EMAIL
   // ============================================================
 
-  /**
-   * Queue Email Notification
-   */
   static async sendEmail({
     userId = null,
     vendorId = null,
-
     email,
-
     template,
     templateData = {},
-
     source = "system",
     sourceId = null,
-
     requestId = null,
-
     priority = 5,
-
     scheduledAt = new Date(),
     expiresAt = null,
-
     tags = [],
     idempotencyKey,
   }) {
@@ -393,6 +523,7 @@ class NotificationService {
       type: "EMAIL",
 
       userId,
+
       vendorId,
 
       recipient: {
@@ -400,9 +531,11 @@ class NotificationService {
       },
 
       template,
+
       templateData,
 
       source,
+
       sourceId,
 
       requestId,
@@ -410,9 +543,11 @@ class NotificationService {
       priority,
 
       scheduledAt,
+
       expiresAt,
 
       tags,
+
       idempotencyKey,
     });
   }
@@ -421,25 +556,16 @@ class NotificationService {
   // TELEGRAM
   // ============================================================
 
-  /**
-   * Queue Telegram Notification
-   */
   static async sendTelegram({
     telegramChatId,
-
     template,
     templateData = {},
-
     source = "system",
     sourceId = null,
-
     requestId = null,
-
     priority = 5,
-
     scheduledAt = new Date(),
     expiresAt = null,
-
     tags = [],
     idempotencyKey,
   }) {
@@ -455,9 +581,11 @@ class NotificationService {
       },
 
       template,
+
       templateData,
 
       source,
+
       sourceId,
 
       requestId,
@@ -465,263 +593,281 @@ class NotificationService {
       priority,
 
       scheduledAt,
+
       expiresAt,
 
       tags,
+
       idempotencyKey,
     });
   }
 
   // ============================================================
-  // BOOKING NOTIFICATIONS
+  // BOOKING CREATED
   // ============================================================
 
   /**
    * Booking Created
    *
-   * Business-level booking notification orchestration.
+   * ONE logical notification is created.
+   *
+   * Policy:
+   *
+   * PUSH
+   *   ↓ failure
+   * WHATSAPP
+   *   ↓ failure
+   * SMS
    *
    * IMPORTANT:
    *
-   * Call this AFTER the booking MongoDB transaction commits.
-   *
-   * Example:
-   *
-   * await session.withTransaction(...)
-   *
-   * // transaction committed
-   *
-   * await NotificationService.bookingCreated(...)
-   *
-   *
-   * Current behavior:
-   *
-   * 1. Notify vendor that a customer booked them.
-   * 2. Notify customer that booking was successfully created.
-   *
-   * Failure of one notification does NOT prevent the other
-   * notification from being queued.
+   * Call after booking transaction commits.
    */
   static async bookingCreated({ booking, user, vendor, requestId = null }) {
     const bookingId = booking?._id?.toString();
-    const bookingDate = booking?.bookingDate.toDateString();
+
     if (!bookingId) {
       throw new Error("booking._id is required for booking notification");
     }
 
-    const jobs = [];
+    // ==========================================================
+    // SAFE BOOKING DATE
+    // ==========================================================
+
+    let bookingDate = "";
+
+    if (booking?.bookingDate) {
+      const date = new Date(booking.bookingDate);
+
+      if (!Number.isNaN(date.getTime())) {
+        bookingDate = date.toDateString();
+      }
+    }
+
+    // ==========================================================
+    // LOG
+    // ==========================================================
 
     NotificationLogger.info(
       {
         event: "BOOKING_NOTIFICATION_STARTED",
+
         bookingId,
+
         userId: user?._id,
+
         vendorId: vendor?._id,
-        bookingDate: bookingDate,
+
+        bookingDate,
+
         type: booking?.type,
+
         pincode: booking?.pincode,
+
+        hasVendorPhone: Boolean(vendor?.phoneNo),
+
+        hasVendorFcmToken: Boolean(vendor?.fcmToken),
+
         requestId,
       },
-      "Preparing booking notifications",
+
+      "Preparing booking notification",
     );
 
-    /**
-     * Vendor notification
-     *
-     * Preserves OLD behavior:
-     *
-     * Name - CUSTOMER_NAME and Mob - CUSTOMER_PHONE
-     * BOOKING_DATE
-     *
-     * SMS destination = vendor.phoneNo
-     */
-    if (vendor?.phoneNo) {
-      jobs.push({
-        recipientType: "vendor",
+    // ==========================================================
+    // RECIPIENT VALIDATION
+    // ==========================================================
 
-        promise: this.sendSMS({
-          vendorId: vendor._id,
-
-          phoneNumber: vendor.phoneNo,
-
-          template: "booking_created_vendor",
-
-          templateData: {
-            name: user?.name || "Customer",
-
-            userPhoneNo: user?.phoneNo || "",
-
-            bookingDate: bookingDate || "",
-          },
-
-          source: "booking",
-          sourceId: bookingId,
-
-          requestId,
-
-          priority: 2,
-
-          tags: ["booking", "booking_created", "vendor"],
-
-          idempotencyKey: `booking:${bookingId}:created:vendor:sms`,
-        }),
-      });
-    } else {
-      NotificationLogger.warn(
-        {
-          event: "BOOKING_VENDOR_NOTIFICATION_SKIPPED",
-          bookingId,
-          vendorId: vendor?._id,
-          requestId,
-          reason: "VENDOR_PHONE_MISSING",
-        },
-        "Vendor booking notification skipped",
-      );
-    }
-
-    if (jobs.length === 0) {
+    if (!vendor?.phoneNo && !vendor?.fcmToken) {
       NotificationLogger.warn(
         {
           event: "BOOKING_NOTIFICATION_NO_RECIPIENT",
+
           bookingId,
+
           userId: user?._id,
+
           vendorId: vendor?._id,
+
           requestId,
+
+          reason: "VENDOR_PHONE_AND_FCM_TOKEN_MISSING",
         },
-        "No valid recipients for booking notifications",
+
+        "No valid vendor notification recipient",
       );
 
       return {
         attempted: 0,
+
         queued: 0,
+
         failed: 0,
+
         results: [],
       };
     }
 
-    const results = await Promise.allSettled(jobs.map((job) => job.promise));
+    // ==========================================================
+    // CREATE ONE BUSINESS NOTIFICATION
+    // ==========================================================
 
-    let queued = 0;
-    let failed = 0;
+    try {
+      const notification = await this.createBusinessNotification({
+        type: "BOOKING",
 
-    const processedResults = results.map((result, index) => {
-      const job = jobs[index];
+        vendorId: vendor?._id,
 
-      if (result.status === "fulfilled") {
-        queued += 1;
+        recipient: {
+          phoneNumber: vendor?.phoneNo || null,
 
-        NotificationLogger.info(
-          {
-            event: "BOOKING_NOTIFICATION_QUEUED",
-            bookingId,
-            recipientType: job.recipientType,
-            notificationId: result.value?._id,
-            requestId,
-          },
-          "Booking notification queued",
-        );
+          whatsappNumber: vendor?.phoneNo || null,
 
-        return {
-          recipientType: job.recipientType,
-          success: true,
-          notificationId: result.value?._id?.toString() || null,
-        };
-      }
-
-      failed += 1;
-
-      NotificationLogger.error(
-        {
-          err: result.reason,
-          event: "BOOKING_NOTIFICATION_QUEUE_FAILED",
-          bookingId,
-          recipientType: job.recipientType,
-          userId: user?._id,
-          vendorId: vendor?._id,
-          requestId,
-          error: result.reason?.message,
-          errorCode: result.reason?.code,
+          pushToken: vendor?.fcmToken || null,
         },
-        "Failed to queue booking notification",
+
+        template: "booking_created_vendor",
+
+        templateData: {
+          // SMS
+          name: user?.name || "Customer",
+
+          userPhoneNo: user?.phoneNo || "",
+
+          bookingDate,
+
+          // PUSH
+          title: "New Booking",
+
+          body: `${user?.name || "Customer"} has booked your service.`,
+
+          type: "booking",
+
+          screen: "orders",
+
+          bookingId,
+        },
+
+        source: "booking",
+
+        sourceId: bookingId,
+
+        requestId,
+
+        priority: 2,
+
+        tags: ["booking", "booking_created", "vendor"],
+
+        // ONE logical event = ONE key.
+        //
+        // Do NOT add :sms / :push here.
+        idempotencyKey: `booking:${bookingId}:created:vendor`,
+      });
+
+      NotificationLogger.info(
+        {
+          event: "BOOKING_NOTIFICATION_QUEUED",
+
+          bookingId,
+
+          notificationId: notification?._id,
+
+          vendorId: vendor?._id,
+
+          channel: notification?.channel,
+
+          channelPolicy: notification?.channelPolicy,
+
+          requestId,
+        },
+
+        "Booking notification queued",
       );
 
       return {
-        recipientType: job.recipientType,
-        success: false,
-        error: result.reason?.message || "Failed to queue notification",
+        attempted: 1,
+
+        queued: 1,
+
+        failed: 0,
+
+        results: [
+          {
+            recipientType: "vendor",
+
+            success: true,
+
+            notificationId: notification?._id?.toString() || null,
+
+            channel: notification?.channel || null,
+          },
+        ],
       };
-    });
+    } catch (error) {
+      NotificationLogger.error(
+        {
+          err: error,
 
-    NotificationLogger.info(
-      {
-        event: "BOOKING_NOTIFICATIONS_COMPLETED",
-        bookingId,
-        userId: user?._id,
-        vendorId: vendor?._id,
-        requestId,
-        attempted: jobs.length,
-        queued,
-        failed,
-      },
-      "Booking notification enqueue completed",
-    );
+          event: "BOOKING_NOTIFICATION_QUEUE_FAILED",
 
-    return {
-      attempted: jobs.length,
-      queued,
-      failed,
-      results: processedResults,
-    };
+          bookingId,
+
+          userId: user?._id,
+
+          vendorId: vendor?._id,
+
+          requestId,
+
+          error: error?.message,
+
+          errorCode: error?.code,
+        },
+
+        "Failed to queue booking notification",
+      );
+
+      // Booking already committed.
+      // Notification failure must NOT make booking fail.
+
+      return {
+        attempted: 1,
+
+        queued: 0,
+
+        failed: 1,
+
+        results: [
+          {
+            recipientType: "vendor",
+
+            success: false,
+
+            error: error?.message || "Failed to queue booking notification",
+          },
+        ],
+      };
+    }
   }
 
   // ============================================================
-  // BOOKING CANCELLATION NOTIFICATIONS
+  // BOOKING CANCELLED
   // ============================================================
 
   /**
    * Booking Cancelled
    *
-   * Business-level cancellation notification orchestration.
+   * ONE logical notification.
    *
-   * IMPORTANT:
+   * Policy:
    *
-   * Call this ONLY after the booking MongoDB transaction commits.
-   *
-   * Flow:
-   *
-   * BookingService.cancelBooking()
-   *        ↓
-   * MongoDB Transaction
-   *        ↓
-   * Transaction Commit
-   *        ↓
-   * NotificationService.bookingCancelled()
-   *        ↓
-   * sendSMS()
-   *        ↓
-   * Notification MongoDB Record
-   *        ↓
-   * BullMQ / Redis
-   *        ↓
-   * Notification Worker
-   *        ↓
-   * SmsProvider
-   *        ↓
-   * FAST2SMSCANCEL
-   *
-   * OLD BEHAVIOR PRESERVED:
-   *
-   * SMS destination:
-   *   vendor.phoneNo
-   *
-   * Template:
-   *   booking_cancelled
-   *
-   * Fast2SMS variables:
-   *   CUSTOMER_NAME | FORMATTED_DATE
+   * PUSH
+   *   ↓ failure
+   * WHATSAPP
+   *   ↓ failure
+   * SMS
    *
    * Notification failure NEVER affects the already committed
-   * booking cancellation.
+   * cancellation.
    */
   static async bookingCancelled({ booking, user, vendor, formattedDate, requestId = null }) {
     const bookingId = booking?._id?.toString();
@@ -730,30 +876,41 @@ class NotificationService {
       throw new Error("booking._id is required for booking notification");
     }
 
-    const userId = user?._id?.toString() || booking?.userId?._id?.toString() || null;
+    // ==========================================================
+    // IDs
+    // ==========================================================
 
-    const vendorId = vendor?._id?.toString() || booking?.vendorId?._id?.toString() || null;
+    const userId =
+      user?._id?.toString() ||
+      booking?.userId?._id?.toString() ||
+      booking?.userId?.toString() ||
+      null;
 
-    /**
-     * Resolve vendor phone.
-     *
-     * Normally booking.vendorId is populated by
-     * loadBookingForCancel().
-     */
+    const vendorId =
+      vendor?._id?.toString() ||
+      booking?.vendorId?._id?.toString() ||
+      booking?.vendorId?.toString() ||
+      null;
+
+    // ==========================================================
+    // VENDOR CONTACT
+    // ==========================================================
+
     const vendorPhoneNumber = vendor?.phoneNo || booking?.vendorId?.phoneNo || null;
 
-    /**
-     * Resolve customer / booking creator name.
-     */
+    const vendorFcmToken = vendor?.fcmToken || booking?.vendorId?.fcmToken || null;
+
+    // ==========================================================
+    // USER NAME
+    // ==========================================================
+
     const userName = user?.name || booking?.userId?.name || "User";
 
-    /**
-     * Resolve cancellation date.
-     *
-     * Prefer the already formatted date supplied by
-     * BookingService so old SMS formatting is preserved.
-     */
-    let cancellationDate = formattedDate;
+    // ==========================================================
+    // CANCELLATION DATE
+    // ==========================================================
+
+    let cancellationDate = formattedDate || "";
 
     if (!cancellationDate && booking?.bookingDate) {
       const bookingDateObj = new Date(booking.bookingDate);
@@ -765,6 +922,28 @@ class NotificationService {
           `${bookingDateObj.getFullYear()}`;
       }
     }
+
+    // ==========================================================
+    // FLUTTER DATA
+    // ==========================================================
+
+    let month = "";
+
+    let year = "";
+
+    if (booking?.bookingDate) {
+      const bookingDateObj = new Date(booking.bookingDate);
+
+      if (!Number.isNaN(bookingDateObj.getTime())) {
+        month = bookingDateObj.getMonth().toString();
+
+        year = bookingDateObj.getFullYear().toString();
+      }
+    }
+
+    // ==========================================================
+    // LOG
+    // ==========================================================
 
     NotificationLogger.info(
       {
@@ -780,17 +959,21 @@ class NotificationService {
 
         formattedDate: cancellationDate,
 
+        hasVendorPhone: Boolean(vendorPhoneNumber),
+
+        hasVendorFcmToken: Boolean(vendorFcmToken),
+
         requestId,
       },
+
       "Preparing booking cancellation notification",
     );
 
-    /**
-     * --------------------------------------------------
-     * Validate recipient
-     * --------------------------------------------------
-     */
-    if (!vendorPhoneNumber) {
+    // ==========================================================
+    // RECIPIENT VALIDATION
+    // ==========================================================
+
+    if (!vendorPhoneNumber && !vendorFcmToken) {
       NotificationLogger.warn(
         {
           event: "BOOKING_CANCEL_NOTIFICATION_SKIPPED",
@@ -803,95 +986,65 @@ class NotificationService {
 
           requestId,
 
-          reason: "VENDOR_PHONE_MISSING",
+          reason: "VENDOR_PHONE_AND_FCM_TOKEN_MISSING",
         },
-        "Booking cancellation notification skipped",
+
+        "No booking cancellation notification channel available",
       );
 
       return {
         attempted: 0,
+
         queued: 0,
+
         failed: 0,
+
         results: [],
       };
     }
 
-    /**
-     * --------------------------------------------------
-     * Validate date
-     * --------------------------------------------------
-     */
-    if (!cancellationDate) {
-      NotificationLogger.warn(
-        {
-          event: "BOOKING_CANCEL_NOTIFICATION_SKIPPED",
+    // ==========================================================
+    // CREATE ONE BUSINESS NOTIFICATION
+    // ==========================================================
 
-          bookingId,
-
-          userId,
-
-          vendorId,
-
-          requestId,
-
-          reason: "BOOKING_DATE_MISSING",
-        },
-        "Booking cancellation notification skipped",
-      );
-
-      return {
-        attempted: 0,
-        queued: 0,
-        failed: 0,
-        results: [],
-      };
-    }
-
-    /**
-     * --------------------------------------------------
-     * Queue cancellation SMS
-     * --------------------------------------------------
-     *
-     * SmsProvider handles the actual Fast2SMS request.
-     *
-     * DO NOT put:
-     * - Fast2SMS URL
-     * - Axios
-     * - provider credentials
-     *
-     * in NotificationService.
-     */
     try {
-      const notification = await this.sendSMS({
+      const notification = await this.createBusinessNotification({
+        type: "CANCELLED",
+
         userId,
 
         vendorId,
 
-        /**
-         * OLD BEHAVIOR:
-         *
-         * Cancellation SMS goes to booked vendor.
-         */
-        phoneNumber: vendorPhoneNumber,
+        recipient: {
+          phoneNumber: vendorPhoneNumber,
 
-        /**
-         * SmsProvider switch case:
-         *
-         * case "booking_cancelled"
-         */
+          whatsappNumber: vendorPhoneNumber,
+
+          pushToken: vendorFcmToken,
+        },
+
         template: "booking_cancelled",
 
-        /**
-         * SmsProvider expects:
-         *
-         * {
-         *   name,
-         *   formattedDate
-         * }
-         */
         templateData: {
           name: userName,
+
           formattedDate: cancellationDate,
+
+          title: "Booking Cancelled",
+
+          body: `${userName} has cancelled the booking.`,
+
+          type: "cancelled",
+
+          screen: "orders",
+
+          data: {
+            id: bookingId,
+
+            month,
+
+            year,
+          },
         },
 
         source: "booking",
@@ -900,10 +1053,12 @@ class NotificationService {
 
         requestId,
 
-        priority: 2,
+        priority: 1,
 
         tags: ["booking", "booking_cancelled", "vendor"],
-        idempotencyKey: `booking:${bookingId}:cancelled:vendor:sms`,
+
+        // ONE logical event.
+        idempotencyKey: `booking:${bookingId}:cancelled:vendor`,
       });
 
       NotificationLogger.info(
@@ -912,20 +1067,27 @@ class NotificationService {
 
           bookingId,
 
-          notificationId: notification?._id?.toString() || null,
+          notificationId: notification?._id,
 
           userId,
 
           vendorId,
 
+          channel: notification?.channel,
+
+          channelPolicy: notification?.channelPolicy,
+
           requestId,
         },
+
         "Booking cancellation notification queued",
       );
 
       return {
         attempted: 1,
+
         queued: 1,
+
         failed: 0,
 
         results: [
@@ -935,6 +1097,8 @@ class NotificationService {
             success: true,
 
             notificationId: notification?._id?.toString() || null,
+
+            channel: notification?.channel || null,
           },
         ],
       };
@@ -953,26 +1117,22 @@ class NotificationService {
 
           requestId,
 
-          error: error.message,
+          error: error?.message,
 
-          errorCode: error.code,
+          errorCode: error?.code,
         },
+
         "Failed to queue booking cancellation notification",
       );
 
-      /**
-       * IMPORTANT:
-       *
-       * Do NOT throw.
-       *
-       * Booking cancellation has already committed.
-       *
-       * Notification failure must never make the API
-       * report that booking cancellation itself failed.
-       */
+      // Cancellation already committed.
+      // Never make cancellation API fail because notification failed.
+
       return {
         attempted: 1,
+
         queued: 0,
+
         failed: 1,
 
         results: [
@@ -981,23 +1141,537 @@ class NotificationService {
 
             success: false,
 
-            error: error.message || "Failed to queue cancellation notification",
+            error: error?.message || "Failed to queue booking cancellation notification",
           },
         ],
       };
     }
   }
+
+
+
+  // ============================================================
+// BOOKING COMPLETED
+// ============================================================
+
+/**
+ * Booking Completed
+ *
+ * ONE logical notification.
+ *
+ * Policy:
+ *
+ * PUSH
+ *   ↓ failure
+ * WHATSAPP
+ *   ↓ failure
+ * SMS
+ *
+ * IMPORTANT:
+ *
+ * This method should be called AFTER the booking completion
+ * transaction has successfully committed.
+ *
+ * Notification failure must NEVER make the completed booking
+ * transaction fail.
+ */
+static async bookingCompleted({
+  booking,
+  user,
+  vendor,
+  amount = null,
+  requestId = null,
+}) {
+  const bookingId = booking?._id?.toString();
+
+  if (!bookingId) {
+    throw new Error("booking._id is required for booking completion notification");
+  }
+
+  // ==========================================================
+  // IDs
+  // ==========================================================
+
+  const userId =
+    user?._id?.toString() ||
+    booking?.userId?._id?.toString() ||
+    booking?.userId?.toString() ||
+    null;
+
+  const vendorId =
+    vendor?._id?.toString() ||
+    booking?.vendorId?._id?.toString() ||
+    booking?.vendorId?.toString() ||
+    null;
+
+  // ==========================================================
+  // VENDOR CONTACT
+  // ==========================================================
+
+  const vendorPhoneNumber =
+    vendor?.phoneNo ||
+    booking?.vendorId?.phoneNo ||
+    null;
+
+  const vendorFcmToken =
+    vendor?.fcmToken ||
+    booking?.vendorId?.fcmToken ||
+    null;
+
+  // ==========================================================
+  // USER CONTACT
+  // ==========================================================
+
+  const userPhoneNumber =
+    user?.phoneNo ||
+    booking?.userId?.phoneNo ||
+    null;
+
+  const userFcmToken =
+    user?.fcmToken ||
+    booking?.userId?.fcmToken ||
+    null;
+
+  // ==========================================================
+  // USER / VENDOR NAME
+  // ==========================================================
+
+  const userName =
+    user?.name ||
+    booking?.userId?.name ||
+    "Customer";
+
+  const vendorName =
+    vendor?.name ||
+    booking?.vendorId?.name ||
+    "Service Provider";
+
+  // ==========================================================
+  // BOOKING DATE
+  // ==========================================================
+
+  let bookingDate = "";
+
+  if (booking?.bookingDate) {
+    const date = new Date(booking.bookingDate);
+
+    if (!Number.isNaN(date.getTime())) {
+      bookingDate = date.toDateString();
+    }
+  }
+
+  // ==========================================================
+  // AMOUNT
+  // ==========================================================
+
+  const notificationAmount =
+    amount ??
+    booking?.amount ??
+    booking?.totalAmount ??
+    booking?.wage ??
+    0;
+
+  // ==========================================================
+  // FLUTTER DATA
+  // ==========================================================
+
+  let month = "";
+  let year = "";
+
+  if (booking?.bookingDate) {
+    const date = new Date(booking.bookingDate);
+
+    if (!Number.isNaN(date.getTime())) {
+      month = date.getMonth().toString();
+      year = date.getFullYear().toString();
+    }
+  }
+
+  // ==========================================================
+  // LOG
+  // ==========================================================
+
+  NotificationLogger.info(
+    {
+      event: "BOOKING_COMPLETED_NOTIFICATION_STARTED",
+
+      bookingId,
+
+      userId,
+
+      vendorId,
+
+      bookingDate,
+
+      amount: notificationAmount,
+
+      hasUserPhone: Boolean(userPhoneNumber),
+
+      hasUserFcmToken: Boolean(userFcmToken),
+
+      hasVendorPhone: Boolean(vendorPhoneNumber),
+
+      hasVendorFcmToken: Boolean(vendorFcmToken),
+
+      requestId,
+    },
+
+    "Preparing booking completion notification",
+  );
+
+  // ==========================================================
+  // RECIPIENT VALIDATION
+  // ==========================================================
+
+  if (
+    !userPhoneNumber &&
+    !userFcmToken &&
+    !vendorPhoneNumber &&
+    !vendorFcmToken
+  ) {
+    NotificationLogger.warn(
+      {
+        event: "BOOKING_COMPLETED_NOTIFICATION_SKIPPED",
+
+        bookingId,
+
+        userId,
+
+        vendorId,
+
+        requestId,
+
+        reason: "NO_NOTIFICATION_RECIPIENT",
+      },
+
+      "No valid booking completion notification recipient",
+    );
+
+    return {
+      attempted: 0,
+      queued: 0,
+      failed: 0,
+      results: [],
+    };
+  }
+
+  const results = [];
+
+  // ==========================================================
+  // USER NOTIFICATION
+  // ==========================================================
+
+  if (userPhoneNumber || userFcmToken) {
+    try {
+      const notification = await this.createBusinessNotification({
+        type: "BOOKING_COMPLETED",
+
+        userId,
+
+        vendorId,
+
+        recipient: {
+          phoneNumber: userPhoneNumber || null,
+
+          whatsappNumber: userPhoneNumber || null,
+
+          pushToken: userFcmToken || null,
+        },
+
+        template: "booking_completed_user",
+
+        templateData: {
+          // SMS / WhatsApp
+          name: userName,
+
+          bookingDate,
+
+          amount: notificationAmount,
+
+          bookingId,
+
+          // PUSH
+          title: "Booking Completed",
+
+          body: `Your booking has been completed successfully.`,
+
+          type: "booking_completed",
+
+          screen: "orders",
+
+          data: {
+            id: bookingId,
+
+            bookingId,
+
+            month,
+
+            year,
+          },
+        },
+
+        source: "booking",
+
+        sourceId: bookingId,
+
+        requestId,
+
+        priority: 2,
+
+        tags: [
+          "booking",
+          "booking_completed",
+          "user",
+        ],
+
+        idempotencyKey:
+          `booking:${bookingId}:completed:user`,
+      });
+
+      results.push({
+        recipientType: "user",
+
+        success: true,
+
+        notificationId:
+          notification?._id?.toString() || null,
+
+        channel:
+          notification?.channel || null,
+      });
+
+      NotificationLogger.info(
+        {
+          event: "BOOKING_COMPLETED_USER_NOTIFICATION_QUEUED",
+
+          bookingId,
+
+          notificationId: notification?._id,
+
+          userId,
+
+          requestId,
+        },
+
+        "Booking completion notification queued for user",
+      );
+    } catch (error) {
+      results.push({
+        recipientType: "user",
+
+        success: false,
+
+        error:
+          error?.message ||
+          "Failed to queue booking completion notification",
+      });
+
+      NotificationLogger.error(
+        {
+          err: error,
+
+          event: "BOOKING_COMPLETED_USER_NOTIFICATION_FAILED",
+
+          bookingId,
+
+          userId,
+
+          requestId,
+
+          errorCode: error?.code,
+        },
+
+        "Failed to queue booking completion notification for user",
+      );
+    }
+  }
+
+  // ==========================================================
+  // VENDOR NOTIFICATION
+  // ==========================================================
+
+  if (vendorPhoneNumber || vendorFcmToken) {
+    try {
+      const notification = await this.createBusinessNotification({
+        type: "BOOKING_COMPLETED",
+
+        userId,
+
+        vendorId,
+
+        recipient: {
+          phoneNumber: vendorPhoneNumber || null,
+
+          whatsappNumber: vendorPhoneNumber || null,
+
+          pushToken: vendorFcmToken || null,
+        },
+
+        template: "booking_completed_vendor",
+
+        templateData: {
+          // SMS / WhatsApp
+          name: vendorName,
+
+          customerName: userName,
+
+          bookingDate,
+
+          amount: notificationAmount,
+
+          bookingId,
+
+          // PUSH
+          title: "Booking Completed",
+
+          body: `Booking for ${userName} has been completed.`,
+
+          type: "booking_completed",
+
+          screen: "orders",
+
+          data: {
+            id: bookingId,
+
+            bookingId,
+
+            month,
+
+            year,
+          },
+        },
+
+        source: "booking",
+
+        sourceId: bookingId,
+
+        requestId,
+
+        priority: 2,
+
+        tags: [
+          "booking",
+          "booking_completed",
+          "vendor",
+        ],
+
+        idempotencyKey:
+          `booking:${bookingId}:completed:vendor`,
+      });
+
+      results.push({
+        recipientType: "vendor",
+
+        success: true,
+
+        notificationId:
+          notification?._id?.toString() || null,
+
+        channel:
+          notification?.channel || null,
+      });
+
+      NotificationLogger.info(
+        {
+          event: "BOOKING_COMPLETED_VENDOR_NOTIFICATION_QUEUED",
+
+          bookingId,
+
+          notificationId: notification?._id,
+
+          vendorId,
+
+          requestId,
+        },
+
+        "Booking completion notification queued for vendor",
+      );
+    } catch (error) {
+      results.push({
+        recipientType: "vendor",
+
+        success: false,
+
+        error:
+          error?.message ||
+          "Failed to queue booking completion notification",
+      });
+
+      NotificationLogger.error(
+        {
+          err: error,
+
+          event: "BOOKING_COMPLETED_VENDOR_NOTIFICATION_FAILED",
+
+          bookingId,
+
+          vendorId,
+
+          requestId,
+
+          errorCode: error?.code,
+        },
+
+        "Failed to queue booking completion notification for vendor",
+      );
+    }
+  }
+
+  // ==========================================================
+  // FINAL RESULT
+  // ==========================================================
+
+  const queued = results.filter(
+    (result) => result.success,
+  ).length;
+
+  const failed = results.filter(
+    (result) => !result.success,
+  ).length;
+
+  NotificationLogger.info(
+    {
+      event: "BOOKING_COMPLETED_NOTIFICATIONS_COMPLETED",
+
+      bookingId,
+
+      userId,
+
+      vendorId,
+
+      requestId,
+
+      attempted: results.length,
+
+      queued,
+
+      failed,
+    },
+
+    "Booking completion notifications completed",
+  );
+
+  return {
+    attempted: results.length,
+
+    queued,
+
+    failed,
+
+    results,
+  };
+}
+
   // ============================================================
   // SELF BOOKING
   // ============================================================
 
   /**
-   * Vendor Self Booking Notification
+   * Self booking is intentionally left as direct SMS
+   * for now.
    *
-   * Self booking is different from normal booking because there
-   * is no customer -> vendor notification pair.
-   *
-   * Usually the vendor only needs confirmation of the blocked date.
+   * We can migrate it separately after the main
+   * BOOKING/CANCELLED flow is working.
    */
   static async selfBookingCreated({ booking, vendor, requestId = null }) {
     const bookingId = booking?._id?.toString();
@@ -1019,6 +1693,7 @@ class NotificationService {
 
           reason: "VENDOR_PHONE_MISSING",
         },
+
         "Self-booking notification skipped",
       );
 
@@ -1042,7 +1717,7 @@ class NotificationService {
 
           pincode: booking?.pincode || "",
 
-          bookingId: bookingId || "",
+          bookingId,
         },
 
         source: "booking",
@@ -1054,6 +1729,7 @@ class NotificationService {
         priority: 3,
 
         tags: ["booking", "self_booking", "vendor"],
+
         idempotencyKey: `booking:${bookingId}:self-created:vendor:sms`,
       });
 
@@ -1069,6 +1745,7 @@ class NotificationService {
 
           requestId,
         },
+
         "Self-booking notification queued",
       );
 
@@ -1086,19 +1763,20 @@ class NotificationService {
 
           requestId,
         },
+
         "Failed to queue self-booking notification",
       );
 
-      /**
-       * Do not rethrow.
-       *
-       * Booking is already committed.
-       * Notification failure must not make the API report
-       * that the booking itself failed.
-       */
+      // Booking already committed.
+      // Notification failure must not make booking fail.
+
       return null;
     }
   }
 }
+
+// ============================================================
+// EXPORT
+// ============================================================
 
 module.exports = NotificationService;

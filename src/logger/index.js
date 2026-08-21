@@ -40,7 +40,9 @@ module.exports = {
   NotificationLogger: logger.child({
     domain: "notification",
   }),
-
+  SchedulerLogger: logger.child({
+    domain: "scheduler",
+  }),
   AuditLogger: logger.child({
     domain: "audit",
   }),
