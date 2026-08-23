@@ -1118,42 +1118,107 @@ class VendorService {
    * Get available vendors with smart pagination
    */
   static async getAvailableVendors(
-    type,
-    pincode,
-    bookingDate1,
-    page,
-    minRating,
-    minWageRate,
-    userIdentifier,
-  ) {
-    const startTime = Date.now();
+  type,
+  pincode,
+  bookingDate1,
+  page,
+  minRating,
+  minWageRate,
+  userIdentifier,
+) {
+  const startTime = Date.now();
 
-    const bookingDate = normalizeDateIST(bookingDate1);
+  // ============================================================
+  // Normalize / validate date
+  // ============================================================
 
-    const cacheDate = bookingDate.toISOString().slice(0, 10);
+  const bookingDate = normalizeDateIST(bookingDate1);
 
-    if (!type || !pincode || !bookingDate) {
-      VendorLogger.warn({
-        event: "AVAILABLE_VENDORS_FAILED",
-        reason: "missing_required_params",
-        type,
-        pincode,
-        bookingDate: bookingDate1,
-        duration_ms: Date.now() - startTime,
-      });
+  if (!type || !pincode || !bookingDate) {
+    VendorLogger.warn({
+      event: "AVAILABLE_VENDORS_FAILED",
+      reason: "missing_required_params",
+      type,
+      pincode,
+      bookingDate: bookingDate1,
+      duration_ms: Date.now() - startTime,
+    });
 
-      throw ApiError.badRequest("Type, pincode, and booking date are required");
-    }
+    throw ApiError.badRequest(
+      "Type, pincode, and booking date are required",
+    );
+  }
 
-    // ============================================================
-    // Find unavailable vendors
-    // ============================================================
+  const cacheDate = bookingDate.toISOString().slice(0, 10);
 
-    const unavailableVendorIds = await CacheService.remember(
-      redisKeys.UNAVAILABLE_VENDOR_IDS(type, pincode, cacheDate),
-      30,
-      async () => {
-        const [bookedVendorIds, leaveVendorIds] = await Promise.all([
+  // ============================================================
+  // Pagination
+  // ============================================================
+
+  const limit = 12;
+  const currentPage = Math.max(parseInt(page, 10) || 1, 1);
+  const skip = (currentPage - 1) * limit;
+
+  // ============================================================
+  // Commission
+  // ============================================================
+
+  const commission = this.getCommission(type);
+
+  // ============================================================
+  // Request context
+  // ============================================================
+
+  const requestContext = `${type}-${pincode}-${bookingDate}`;
+
+  // ============================================================
+  // Projection
+  // ============================================================
+
+  const PROJECTION_STRING =
+    "_id name type gender phoneNo rating ratingCount " +
+    "wageRate wageRateType imgURL completedVendor experience " +
+    "isVerified status";
+
+  const PROJECTION = {
+    _id: 1,
+    name: 1,
+    type: 1,
+    gender: 1,
+    phoneNo: 1,
+    rating: 1,
+    ratingCount: 1,
+    wageRate: 1,
+    wageRateType: 1,
+    imgURL: 1,
+    completedVendor: 1,
+    experience: 1,
+    isVerified: 1,
+    status: 1,
+  };
+
+  // ============================================================
+  // Find unavailable vendors
+  //
+  // Redis caches:
+  //   - already booked vendors
+  //   - vendors on leave
+  //
+  // This avoids repeatedly hitting MongoDB for availability data.
+  // ============================================================
+
+  const availabilityStart = Date.now();
+
+  const unavailableVendorIds = await CacheService.remember(
+    redisKeys.UNAVAILABLE_VENDOR_IDS(
+      type,
+      pincode,
+      cacheDate,
+    ),
+    30,
+    async () => {
+      const [bookedVendorIds, leaveVendorIds] =
+        await Promise.all([
           Bookings.distinct("vendorId", {
             type,
             pincode,
@@ -1161,129 +1226,184 @@ class VendorService {
             cancelOrder: { $ne: true },
           }),
 
-          VendorLeaveService.getUnavailableVendorIds(bookingDate),
+          VendorLeaveService.getUnavailableVendorIds(
+            bookingDate,
+          ),
         ]);
 
-        return [
-          ...new Set([
-            ...bookedVendorIds.map((id) => id.toString()),
+      return [
+        ...new Set([
+          ...bookedVendorIds.map((id) => id.toString()),
+          ...leaveVendorIds.map((id) => id.toString()),
+        ]),
+      ];
+    },
+    {
+      tags: ["vendors", "availability"],
+    },
+  );
 
-            ...leaveVendorIds.map((id) => id.toString()),
-          ]),
-        ];
-      },
-      {
-        tags: ["vendors", "availability"],
-      },
-    );
+  const availabilityMs = Date.now() - availabilityStart;
 
-    const excludedObjectIds = unavailableVendorIds
-      .filter(mongoose.Types.ObjectId.isValid)
-      .map((id) => new mongoose.Types.ObjectId(id));
+  // ============================================================
+  // Convert unavailable IDs to ObjectIds
+  // ============================================================
 
-    // ============================================================
-    // Pagination
-    // ============================================================
+  const excludedObjectIds = unavailableVendorIds
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
 
-    const limit = 12;
+  // ============================================================
+  // Base vendor filter
+  //
+  // IMPORTANT:
+  // Only active vendors are available.
+  // ============================================================
 
-    const commission = this.getCommission(type);
+  const baseMatchStage = {
+    type,
+    pincode,
 
-    const skip = (page - 1) * limit;
+    status: "active",
 
-    const requestContext = `${type}-${pincode}-${bookingDate}`;
+    balance: {
+      $gte: commission,
+    },
 
-    // ============================================================
-    // Projection
-    // ============================================================
+    wageRate: {
+      $exists: true,
+      $gte: minWageRate,
+    },
 
-    const PROJECTION = {
-      _id: 1,
-      name: 1,
-      type: 1,
-      gender: 1,
-      phoneNo: 1,
-      rating: 1,
-      ratingCount: 1,
-      wageRate: 1,
-      wageRateType: 1,
-      imgURL: 1,
-      completedVendor: 1,
-      experience: 1,
-      isVerified: 1,
-      status: 1,
+    rating: {
+      $gte: minRating,
+    },
+  };
+
+  // ============================================================
+  // Exclude unavailable vendors
+  // ============================================================
+
+  if (excludedObjectIds.length > 0) {
+    baseMatchStage._id = {
+      $nin: excludedObjectIds,
     };
+  }
 
-    const PROJECTION_STRING =
-      "_id name type gender phoneNo rating ratingCount wageRate wageRateType imgURL completedVendor experience isVerified status";
+  // ============================================================
+  // Total count
+  //
+  // Cached for 30 seconds.
+  // ============================================================
 
-    // ============================================================
-    // Base vendor filter
-    //
-    // IMPORTANT:
-    // Only ACTIVE vendors are available for booking.
-    // Blocked vendors will be excluded from every query
-    // using this baseMatchStage.
-    // ============================================================
+  const countStart = Date.now();
 
-    const baseMatchStage = {
+  const totalCountPromise = CacheService.remember(
+    redisKeys.VENDOR_COUNT_CACHE(
       type,
-
       pincode,
+      cacheDate,
+      minRating,
+      minWageRate,
+    ),
+    30,
+    () => Vendor.countDocuments(baseMatchStage),
+    {
+      tags: ["vendors", "availability"],
+    },
+  );
 
-      // Only active vendors can be shown/booked
-      status: "active",
+  // ============================================================
+  // Find fresh vendors
+  //
+  // IMPORTANT:
+  //
+  // We do NOT open a MongoDB transaction here.
+  //
+  // This endpoint is a read/search operation and should not hold
+  // a MongoDB transaction while serving normal vendor discovery.
+  // ============================================================
 
-      balance: {
-        $gte: commission,
-      },
+  const findStart = Date.now();
 
-      wageRate: {
-        $exists: true,
-        $gte: minWageRate,
-      },
+  let freshCandidates = [];
 
-      rating: {
-        $gte: minRating,
-      },
-    };
+  try {
+    freshCandidates = await Vendor.find({
+      ...baseMatchStage,
 
-    // ============================================================
-    // Exclude booked / leave vendors
-    // ============================================================
+      $or: [
+        {
+          [`userShownContext.${userIdentifier}`]: {
+            $ne: requestContext,
+          },
+        },
 
-    if (excludedObjectIds.length > 0) {
-      baseMatchStage._id = {
-        $nin: excludedObjectIds,
-      };
+        {
+          [`userShownContext.${userIdentifier}`]: {
+            $exists: false,
+          },
+        },
+      ],
+    })
+      .limit(limit * 3)
+      .select(PROJECTION_STRING)
+      .lean();
+  } catch (error) {
+    VendorLogger.error({
+      event: "AVAILABLE_VENDORS_FIND_ERROR",
+      type,
+      pincode,
+      bookingDate: cacheDate,
+      userIdentifier,
+      err: error,
+      duration_ms: Date.now() - startTime,
+    });
+
+    throw error;
+  }
+
+  const findMs = Date.now() - findStart;
+
+  // ============================================================
+  // Atomically claim vendors as "shown"
+  //
+  // Instead of:
+  //
+  //   READ → transaction → bulkWrite
+  //
+  // we use:
+  //
+  //   findOneAndUpdate()
+  //
+  // for each candidate.
+  //
+  // This prevents two concurrent requests from successfully
+  // claiming the same vendor for the same user/context.
+  // ============================================================
+
+  const claimStart = Date.now();
+
+  const vendors = [];
+  const claimedVendorIds = new Set();
+
+  for (const candidate of freshCandidates) {
+    if (vendors.length >= limit) {
+      break;
     }
 
-    // ============================================================
-    // Total count
-    // ============================================================
+    // Avoid duplicate candidates within this request.
+    const candidateId = candidate._id.toString();
 
-    const totalCountPromise = CacheService.remember(
-      redisKeys.VENDOR_COUNT_CACHE(type, pincode, cacheDate, minRating, minWageRate),
-      30,
-      () => Vendor.countDocuments(baseMatchStage),
-      {
-        tags: ["vendors", "availability"],
-      },
-    );
-
-    let vendors = [];
-
-    let isFreshData = false;
-
-    const session = await Vendor.startSession();
+    if (claimedVendorIds.has(candidateId)) {
+      continue;
+    }
 
     try {
-      await session.withTransaction(async () => {
-        // ======================================================
-        // Find fresh vendors for this user/request
-        // ======================================================
+      const claimedVendor = await Vendor.findOneAndUpdate(
+        {
+          _id: candidate._id,
 
-        const freshVendors = await Vendor.find({
           ...baseMatchStage,
 
           $or: [
@@ -1299,201 +1419,228 @@ class VendorService {
               },
             },
           ],
-        })
-          .session(session)
-          .limit(limit)
-          .select(PROJECTION_STRING)
-          .lean();
-
-        VendorLogger.info({
-          event: "VENDOR_AVAILABILITY_DEBUG",
-          type,
-          pincode,
-          bookingDate: cacheDate,
-          userIdentifier,
-          requestContext,
-          unavailableCount: excludedObjectIds.length,
-          totalAvailable: await Vendor.countDocuments(baseMatchStage),
-          freshCount: freshVendors.length,
-          freshVendorIds: freshVendors.map((v) => v._id.toString()),
-        });
-
-        // ======================================================
-        // Mark vendors as shown
-        // ======================================================
-
-        if (freshVendors.length > 0) {
-          const bulkOps = freshVendors.map((vendor) => ({
-            updateOne: {
-              filter: {
-                _id: vendor._id,
-              },
-
-              update: {
-                $set: {
-                  [`userShownContext.${userIdentifier}`]: requestContext,
-
-                  lastShownContext: requestContext,
-                },
-              },
-            },
-          }));
-
-          await Vendor.bulkWrite(bulkOps, { session });
-
-          vendors = freshVendors;
-
-          isFreshData = true;
-        }
-      });
-    } catch (error) {
-      VendorLogger.error({
-        event: "AVAILABLE_VENDORS_TRANSACTION_ERROR",
-        type,
-        pincode,
-        userIdentifier,
-        err: error,
-        duration_ms: Date.now() - startTime,
-      });
-
-      throw error;
-    } finally {
-      await session.endSession();
-    }
-
-    // ============================================================
-    // Get total count
-    // ============================================================
-
-    const totalCount = await totalCountPromise;
-
-    // ============================================================
-    // Fallback 1
-    //
-    // Previously shown vendors for this user.
-    //
-    // baseMatchStage still contains:
-    // status: "active"
-    //
-    // so blocked vendors are excluded.
-    // ============================================================
-
-    if (vendors.length === 0) {
-      vendors = await Vendor.find({
-        ...baseMatchStage,
-
-        [`userShownContext.${userIdentifier}`]: requestContext,
-      })
-        .select(PROJECTION_STRING)
-        .limit(limit)
-        .lean();
-    }
-
-    // ============================================================
-    // Fallback 2
-    //
-    // Random vendors.
-    //
-    // baseMatchStage again ensures only active vendors
-    // are selected.
-    // ============================================================
-
-    if (vendors.length === 0) {
-      vendors = await Vendor.aggregate([
-        {
-          $match: baseMatchStage,
         },
-
         {
-          $sample: {
-            size: Math.min(1000, totalCount),
+          $set: {
+            [`userShownContext.${userIdentifier}`]:
+              requestContext,
+
+            lastShownContext: requestContext,
           },
         },
-
         {
-          $skip: skip,
+          new: true,
+          projection: PROJECTION,
         },
+      ).lean();
 
-        {
-          $limit: limit,
-        },
+      if (claimedVendor) {
+        claimedVendorIds.add(candidateId);
+        vendors.push(claimedVendor);
+      }
+    } catch (error) {
+      VendorLogger.error({
+        event: "AVAILABLE_VENDOR_CLAIM_ERROR",
+        vendorId: candidateId,
+        type,
+        pincode,
+        bookingDate: cacheDate,
+        userIdentifier,
+        err: error,
+      });
 
-        {
-          $project: PROJECTION,
+      // Continue trying other vendors.
+    }
+  }
+
+  const claimMs = Date.now() - claimStart;
+
+  let isFreshData = vendors.length > 0;
+
+  // ============================================================
+  // Get total count
+  // ============================================================
+
+  const totalCount = await totalCountPromise;
+
+  const countMs = Date.now() - countStart;
+
+  // ============================================================
+  // Fallback 1
+  //
+  // Previously shown vendors for this user.
+  // ============================================================
+
+  if (vendors.length === 0) {
+    const fallbackStart = Date.now();
+
+    const previouslyShownVendors = await Vendor.find({
+      ...baseMatchStage,
+
+      [`userShownContext.${userIdentifier}`]:
+        requestContext,
+    })
+      .select(PROJECTION_STRING)
+      .limit(limit)
+      .lean();
+
+    vendors.push(...previouslyShownVendors);
+
+    VendorLogger.debug?.({
+      event: "AVAILABLE_VENDORS_FALLBACK_PREVIOUS",
+      count: previouslyShownVendors.length,
+      duration_ms: Date.now() - fallbackStart,
+    });
+  }
+
+  // ============================================================
+  // Fallback 2
+  //
+  // Random vendors.
+  //
+  // This should be reached only when no normal vendors are found.
+  // ============================================================
+
+  if (vendors.length === 0 && totalCount > 0) {
+    const fallbackStart = Date.now();
+
+    const randomVendors = await Vendor.aggregate([
+      {
+        $match: baseMatchStage,
+      },
+
+      {
+        $sample: {
+          size: Math.min(1000, totalCount),
         },
-      ]);
+      },
+
+      {
+        $skip: skip,
+      },
+
+      {
+        $limit: limit,
+      },
+
+      {
+        $project: PROJECTION,
+      },
+    ]);
+
+    vendors.push(...randomVendors);
+
+    VendorLogger.debug?.({
+      event: "AVAILABLE_VENDORS_FALLBACK_RANDOM",
+      count: randomVendors.length,
+      duration_ms: Date.now() - fallbackStart,
+    });
+  }
+
+  // ============================================================
+  // Sort vendors
+  //
+  // 1. Verified vendors
+  // 2. Rating
+  // 3. Completed bookings
+  // ============================================================
+
+  vendors.sort((a, b) => {
+    if (
+      (b.isVerified ? 1 : 0) !==
+      (a.isVerified ? 1 : 0)
+    ) {
+      return (
+        (b.isVerified ? 1 : 0) -
+        (a.isVerified ? 1 : 0)
+      );
     }
 
-    // ============================================================
-    // Sort vendors
-    // ============================================================
+    if ((b.rating || 0) !== (a.rating || 0)) {
+      return (b.rating || 0) - (a.rating || 0);
+    }
 
-    vendors.sort((a, b) => {
-      if ((b.isVerified ? 1 : 0) !== (a.isVerified ? 1 : 0)) {
-        return (b.isVerified ? 1 : 0) - (a.isVerified ? 1 : 0);
-      }
+    return (
+      (b.completedVendor || 0) -
+      (a.completedVendor || 0)
+    );
+  });
 
-      if ((b.rating || 0) !== (a.rating || 0)) {
-        return (b.rating || 0) - (a.rating || 0);
-      }
+  // ============================================================
+  // Format response
+  // ============================================================
 
-      return (b.completedVendor || 0) - (a.completedVendor || 0);
-    });
+  const formattedVendors = vendors.map((vendor) => ({
+    ...vendor,
 
-    // ============================================================
-    // Format response
-    // ============================================================
+    phoneNo: vendor.phoneNo
+      ? vendor.phoneNo
+          .toString()
+          .replace(
+            /(\d{2})\d{6}(\d{2})/,
+            "$1******$2",
+          )
+      : "",
+  }));
 
-    const formattedVendors = vendors.map((vendor) => ({
-      ...vendor,
+  // ============================================================
+  // Final logging
+  // ============================================================
 
-      phoneNo: vendor.phoneNo
-        ? vendor.phoneNo.toString().replace(/(\d{2})\d{6}(\d{2})/, "$1******$2")
-        : "",
-    }));
+  const durationMs = Date.now() - startTime;
 
-    // ============================================================
-    // Logging
-    // ============================================================
+  VendorLogger.info({
+    event: "AVAILABLE_VENDORS_RETRIEVED",
 
-    VendorLogger.info({
-      event: "AVAILABLE_VENDORS_RETRIEVED",
+    type,
+    pincode,
+    bookingDate: cacheDate,
 
-      type,
+    total: totalCount,
 
-      total: totalCount,
+    returnedCount: formattedVendors.length,
 
-      returnedCount: formattedVendors.length,
+    freshData: isFreshData,
 
-      freshData: isFreshData,
+    currentPage: currentPage,
 
-      currentPage: page,
+    totalPages: Math.ceil(totalCount / limit),
 
-      totalPages: Math.ceil(totalCount / limit),
+    hasNextPage:
+      skip + vendors.length < totalCount,
 
-      hasNextPage: skip + vendors.length < totalCount,
+    unavailableCount: excludedObjectIds.length,
 
-      duration_ms: Date.now() - startTime,
-    });
+    timing: {
+      availability_ms: availabilityMs,
+      vendor_find_ms: findMs,
+      vendor_claim_ms: claimMs,
+      count_ms: countMs,
+      total_ms: durationMs,
+    },
 
-    // ============================================================
-    // Response
-    // ============================================================
-    console.log(formattedVendors);
-    return {
-      total: totalCount,
+    duration_ms: durationMs,
+  });
 
-      vendors: formattedVendors,
+  // ============================================================
+  // Response
+  // ============================================================
 
-      freshData: isFreshData,
+  return {
+    total: totalCount,
 
-      currentPage: page,
+    vendors: formattedVendors,
 
-      totalPages: Math.ceil(totalCount / limit),
+    freshData: isFreshData,
 
-      hasNextPage: skip + vendors.length < totalCount,
-    };
-  }
+    currentPage: currentPage,
+
+    totalPages: Math.ceil(totalCount / limit),
+
+    hasNextPage:
+      skip + vendors.length < totalCount,
+  };
+}
 
   /**
    * ============================================

@@ -18,8 +18,8 @@ const QUEUE_NAME = "low-balance";
 
 // Vendor threshold comes from .env
 // Example:
-// LOW_BALANCE_THRESHOLD=100
-const VENDOR_LOW_BALANCE_THRESHOLD = Number(process.env.LOW_BALANCE_THRESHOLD) || 100;
+// LOW_BALANCE_THRESHOLD=150
+const VENDOR_LOW_BALANCE_THRESHOLD = Number(process.env.LOW_BALANCE_THRESHOLD) || 150;
 
 // User threshold is fixed at ₹30
 const USER_LOW_BALANCE_THRESHOLD = 30;
@@ -143,7 +143,7 @@ const worker = new Worker(
         // One notification per vendor per IST day
         // --------------------------------------------------------
 
-        const idempotencyKey = `low-balance:vendor:${vendorId}:${dateKey}`;
+        const idempotencyKey = `low-balance:vendor:${vendorId}:${dateKey}:${new Date().getTime()}`;
 
         WorkerLogger.debug(
           {
@@ -177,9 +177,11 @@ const worker = new Worker(
 
             type: "low_balance",
 
-            screen: "profile",
+            screen: "wallet",
 
             data: {
+              screen: "wallet",
+              type: "low_balance",
               vendorId,
               balance: String(vendor.balance),
             },
@@ -333,9 +335,11 @@ const worker = new Worker(
 
             type: "low_balance",
 
-            screen: "profile",
+            screen: "wallet",
 
             data: {
+              screen: "wallet",
+              type: "low_balance",
               userId,
               balance: String(user.balance),
             },

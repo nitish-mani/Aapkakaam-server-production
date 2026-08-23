@@ -6,19 +6,33 @@
  * IMPORTANT:
  *
  * notification.type
- *   = business/event type
+ *   = business/event type OR legacy notification type
  *
  * notification.channel
- *   = delivery channel
+ *   = actual delivery channel
  *
- * Example:
+ * Legacy examples:
+ *
+ * type    = PUSH
+ * channel = PUSH
+ *
+ * type    = SMS
+ * channel = SMS
+ *
+ * Business examples:
  *
  * type    = PAYMENT
  * channel = PUSH
  *
- * Policy:
+ * type    = CONCERN
+ * channel = PUSH
+ *
+ * Business policy:
  *
  * PAYMENT
+ *   PUSH -> WHATSAPP -> SMS
+ *
+ * CONCERN
  *   PUSH -> WHATSAPP -> SMS
  */
 
@@ -74,21 +88,56 @@ const CONFIG = Object.freeze({
   ],
 
   // ============================================================
-  // BUSINESS NOTIFICATION TYPES
+  // NOTIFICATION TYPES
   // ============================================================
   //
-  // These are NOT providers.
+  // IMPORTANT:
   //
-  // Example:
+  // This list contains BOTH:
   //
-  // PAYMENT
-  // BOOKING
-  // CANCELLED
-  // OTP
+  // 1. Legacy notification types
+  //
+  //    PUSH
+  //    SMS
+  //    EMAIL
+  //    TELEGRAM
+  //    WHATSAPP
+  //    IN_APP
+  //
+  // 2. Business notification types
+  //
+  //    OTP
+  //    BOOKING
+  //    CANCELLED
+  //    PAYMENT
+  //    CONCERN
+  //
+  // This is required for backward compatibility.
   //
   // ============================================================
 
-  VALID_NOTIFICATION_TYPES: ["OTP", "BOOKING", "CANCELLED", "PAYMENT"],
+  VALID_NOTIFICATION_TYPES: [
+    // ----------------------------------------------------------
+    // Legacy types
+    // ----------------------------------------------------------
+
+    "SMS",
+    "EMAIL",
+    "PUSH",
+    "TELEGRAM",
+    "WHATSAPP",
+    "IN_APP",
+
+    // ----------------------------------------------------------
+    // Business/event types
+    // ----------------------------------------------------------
+
+    "OTP",
+    "BOOKING",
+    "CANCELLED",
+    "PAYMENT",
+    "CONCERN",
+  ],
 
   // ============================================================
   // DELIVERY CHANNELS

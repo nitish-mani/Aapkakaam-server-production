@@ -439,12 +439,11 @@ const getConcernByIdAdmin = async (req, res) => {
 const updateConcernStatus = async (req, res) => {
   try {
     const { concernId } = req.params;
-
     const { status, adminResponse } = req.body;
 
-    // --------------------------------------------------------
-    // Admin authentication
-    // --------------------------------------------------------
+    // ========================================================
+    // ADMIN AUTHENTICATION
+    // ========================================================
 
     if (!isAdmin(req)) {
       return res.status(403).json({
@@ -453,9 +452,9 @@ const updateConcernStatus = async (req, res) => {
       });
     }
 
-    // --------------------------------------------------------
-    // Validate concern ID
-    // --------------------------------------------------------
+    // ========================================================
+    // VALIDATE CONCERN ID
+    // ========================================================
 
     if (!ObjectId.isValid(concernId)) {
       return res.status(400).json({
@@ -464,9 +463,9 @@ const updateConcernStatus = async (req, res) => {
       });
     }
 
-    // --------------------------------------------------------
-    // Validate status
-    // --------------------------------------------------------
+    // ========================================================
+    // VALIDATE STATUS
+    // ========================================================
 
     const allowedStatuses = ["Open", "InProgress", "Resolved", "Rejected", "Closed"];
 
@@ -477,9 +476,9 @@ const updateConcernStatus = async (req, res) => {
       });
     }
 
-    // --------------------------------------------------------
-    // Response required for resolution/rejection
-    // --------------------------------------------------------
+    // ========================================================
+    // ADMIN RESPONSE REQUIRED
+    // ========================================================
 
     if (["Resolved", "Rejected"].includes(status) && (!adminResponse || !adminResponse.trim())) {
       return res.status(400).json({
@@ -488,9 +487,9 @@ const updateConcernStatus = async (req, res) => {
       });
     }
 
-    // --------------------------------------------------------
-    // Get existing concern first
-    // --------------------------------------------------------
+    // ========================================================
+    // GET EXISTING CONCERN
+    // ========================================================
 
     const existingConcern = await Concern.findOne({
       _id: new ObjectId(concernId),
@@ -504,15 +503,15 @@ const updateConcernStatus = async (req, res) => {
       });
     }
 
-    // --------------------------------------------------------
-    // Check whether status actually changed
-    // --------------------------------------------------------
+    // ========================================================
+    // CHECK STATUS CHANGE
+    // ========================================================
 
     const statusChanged = existingConcern.status !== status;
 
-    // --------------------------------------------------------
-    // Prepare update
-    // --------------------------------------------------------
+    // ========================================================
+    // PREPARE UPDATE
+    // ========================================================
 
     const updateData = {
       status,
@@ -528,9 +527,9 @@ const updateConcernStatus = async (req, res) => {
       updateData.resolvedAt = null;
     }
 
-    // --------------------------------------------------------
-    // Update concern
-    // --------------------------------------------------------
+    // ========================================================
+    // UPDATE CONCERN
+    // ========================================================
 
     const concern = await Concern.findOneAndUpdate(
       {
@@ -554,85 +553,119 @@ const updateConcernStatus = async (req, res) => {
     }
 
     // ========================================================
-    // PUSH NOTIFICATION
+    // NOTIFICATION RESULT
     // ========================================================
 
     let notificationQueued = false;
     let notificationId = null;
     let notificationError = null;
 
-    /**
-     * Only send push when status actually changes.
-     *
-     * Open -> InProgress
-     * InProgress -> Resolved
-     *
-     * But:
-     *
-     * Resolved -> Resolved
-     *
-     * will NOT send another push.
-     */
+    // ========================================================
+    // SEND NOTIFICATION ONLY IF STATUS CHANGED
+    // ========================================================
+
     if (statusChanged) {
       try {
-        let recipient = null;
+        // ======================================================
+        // FIND RECIPIENT
+        // ======================================================
 
-        // ----------------------------------------------------
-        // User concern
-        // ----------------------------------------------------
+        let recipient = null;
 
         if (existingConcern.raisedBy === "User") {
           const User = require("../models/user");
 
           recipient = await User.findById(existingConcern.raisedById)
-            .select("_id name fcmToken")
+            .select("_id name phoneNo fcmToken")
             .lean();
-        }
-
-        // ----------------------------------------------------
-        // Vendor concern
-        // ----------------------------------------------------
-        else if (existingConcern.raisedBy === "Vendor") {
+        } else if (existingConcern.raisedBy === "Vendor") {
           const Vendor = require("../models/vendor");
 
           recipient = await Vendor.findById(existingConcern.raisedById)
-            .select("_id name fcmToken")
+            .select("_id name phoneNo fcmToken")
             .lean();
         }
 
-        // ----------------------------------------------------
-        // Recipient not found
-        // ----------------------------------------------------
+        // ======================================================
+        // RECIPIENT NOT FOUND
+        // ======================================================
 
         if (!recipient) {
-          console.warn(
-            `[ConcernNotification] Recipient not found: ${existingConcern.raisedBy}:${existingConcern.raisedById}`,
-          );
+          console.warn("[ConcernNotification] Recipient not found", {
+            raisedBy: existingConcern.raisedBy,
+            raisedById: existingConcern.raisedById?.toString?.() || null,
+            concernId,
+          });
         } else {
-          const pushToken = String(recipient.fcmToken || "").trim();
+          // ====================================================
+          // RECIPIENT INFORMATION
+          // ====================================================
 
-          // --------------------------------------------------
-          // FCM token missing
-          // --------------------------------------------------
+          const phoneNumber = recipient.phoneNo || null;
 
-          if (!pushToken) {
-            console.warn(
-              `[ConcernNotification] FCM token missing for ${existingConcern.raisedBy}:${existingConcern.raisedById}`,
-            );
+          const pushToken = recipient.fcmToken || null;
+
+          const whatsappNumber = recipient.phoneNo || null;
+
+          const userId =
+            existingConcern.raisedBy === "User"
+              ? existingConcern.raisedById?.toString?.() || null
+              : null;
+
+          const vendorId =
+            existingConcern.raisedBy === "Vendor"
+              ? existingConcern.raisedById?.toString?.() || null
+              : null;
+
+          // ====================================================
+          // LOG RECIPIENT
+          // ====================================================
+
+          console.info("[ConcernNotification] Preparing notification:", {
+            concernId: concernId.toString(),
+
+            status,
+
+            userId,
+
+            vendorId,
+
+            hasPhoneNumber: Boolean(phoneNumber),
+
+            hasFcmToken: Boolean(pushToken),
+
+            hasWhatsAppNumber: Boolean(whatsappNumber),
+
+            requestId: req.id || null,
+          });
+
+          // ====================================================
+          // CHECK NOTIFICATION RECIPIENT
+          // ====================================================
+
+          if (!phoneNumber && !pushToken) {
+            console.warn("[ConcernNotification] No notification recipient available:", {
+              concernId: concernId.toString(),
+
+              userId,
+
+              vendorId,
+            });
           } else {
-            // ------------------------------------------------
-            // Build notification content
-            // ------------------------------------------------
+            // ==================================================
+            // NOTIFICATION CONTENT
+            // ==================================================
 
             let title = "Concern Updated";
 
-            let body = `Your concern "${existingConcern.subject}" ` + "has been updated.";
+            let body =
+              `Your concern "${existingConcern.subject || "Concern"}" ` + "has been updated.";
 
             switch (status) {
               case "Open":
                 title = "Concern Opened";
 
-                body = `Your concern "${existingConcern.subject}" ` + "is now open.";
+                body = `Your concern "${existingConcern.subject || "Concern"}" ` + "is now open.";
 
                 break;
 
@@ -640,7 +673,7 @@ const updateConcernStatus = async (req, res) => {
                 title = "Concern In Progress";
 
                 body =
-                  `Your concern "${existingConcern.subject}" ` +
+                  `Your concern "${existingConcern.subject || "Concern"}" ` +
                   "is now being reviewed by our team.";
 
                 break;
@@ -648,60 +681,111 @@ const updateConcernStatus = async (req, res) => {
               case "Resolved":
                 title = "Concern Resolved";
 
-                body = `Your concern "${existingConcern.subject}" ` + "has been resolved.";
+                body =
+                  `Your concern "${existingConcern.subject || "Concern"}" ` + "has been resolved.";
 
                 break;
 
               case "Rejected":
                 title = "Concern Rejected";
 
-                body = `Your concern "${existingConcern.subject}" ` + "has been rejected.";
+                body =
+                  `Your concern "${existingConcern.subject || "Concern"}" ` + "has been rejected.";
 
                 break;
 
               case "Closed":
                 title = "Concern Closed";
 
-                body = `Your concern "${existingConcern.subject}" ` + "has been closed.";
+                body =
+                  `Your concern "${existingConcern.subject || "Concern"}" ` + "has been closed.";
 
                 break;
             }
 
-            // ------------------------------------------------
-            // Add admin response to notification body
-            // ------------------------------------------------
+            // ==================================================
+            // ADMIN RESPONSE
+            // ==================================================
 
-            if (
-              ["Resolved", "Rejected"].includes(status) &&
-              adminResponse &&
-              adminResponse.trim()
-            ) {
-              body += ` Response: ${adminResponse.trim()}`;
+            const trimmedAdminResponse =
+              typeof adminResponse === "string" ? adminResponse.trim() : "";
+
+            if (["Resolved", "Rejected"].includes(status) && trimmedAdminResponse) {
+              body += ` Response: ${trimmedAdminResponse}`;
             }
 
-            // ------------------------------------------------
-            // User/Vendor ownership
-            // ------------------------------------------------
+            // ==================================================
+            // CREATE BUSINESS NOTIFICATION
+            // ==================================================
+            //
+            // One business event
+            //        ↓
+            // One Notification document
+            //        ↓
+            // BullMQ
+            //        ↓
+            // Worker
+            //        ↓
+            // Dispatcher
+            //        ↓
+            // PUSH
+            //        ↓ failure
+            // WHATSAPP
+            //        ↓ failure
+            // SMS
+            //
+            // ==================================================
 
-            const userId = existingConcern.raisedBy === "User" ? existingConcern.raisedById : null;
+            const notification = await NotificationService.createBusinessNotification({
+              // IMPORTANT:
+              //
+              // This value must exist in:
+              //
+              // Notification VALID_NOTIFICATION_TYPES
+              //
+              // and:
+              //
+              // DEFAULT_CHANNEL_POLICIES
+              //
+              type: "CONCERN",
 
-            const vendorId =
-              existingConcern.raisedBy === "Vendor" ? existingConcern.raisedById : null;
-
-            // ------------------------------------------------
-            // Queue push notification
-            // ------------------------------------------------
-
-            const notification = await NotificationService.sendPush({
               userId,
 
               vendorId,
 
-              pushToken,
+              recipient: {
+                phoneNumber,
+
+                whatsappNumber,
+
+                pushToken,
+              },
 
               template: "concern_status_updated",
 
               templateData: {
+                // ============================================
+                // COMMON DATA
+                // ============================================
+
+                concernId: concernId.toString(),
+
+                subject: existingConcern.subject || "",
+
+                status,
+
+                category: existingConcern.category || "",
+
+                priority: existingConcern.priority || "",
+
+                raisedBy: existingConcern.raisedBy || "",
+
+                adminResponse: trimmedAdminResponse,
+
+                // ============================================
+                // PUSH DATA
+                // ============================================
+
                 title,
 
                 body,
@@ -715,21 +799,25 @@ const updateConcernStatus = async (req, res) => {
 
                   status,
 
-                  category: existingConcern.category,
+                  category: existingConcern.category || "",
 
-                  priority: existingConcern.priority,
+                  priority: existingConcern.priority || "",
 
-                  raisedBy: existingConcern.raisedBy,
+                  raisedBy: existingConcern.raisedBy || "",
 
-                  subject: existingConcern.subject,
+                  subject: existingConcern.subject || "",
 
-                  ...(adminResponse && adminResponse.trim()
+                  ...(trimmedAdminResponse
                     ? {
-                        adminResponse: adminResponse.trim(),
+                        adminResponse: trimmedAdminResponse,
                       }
                     : {}),
                 },
               },
+
+              // ==================================================
+              // BUSINESS SOURCE
+              // ==================================================
 
               source: "concern",
 
@@ -737,60 +825,101 @@ const updateConcernStatus = async (req, res) => {
 
               requestId: req.id || null,
 
+              // Resolved / Rejected = higher priority
               priority: status === "Resolved" || status === "Rejected" ? 2 : 3,
 
               tags: [
                 "concern",
                 "concern_status",
                 status.toLowerCase(),
-                existingConcern.raisedBy.toLowerCase(),
+                existingConcern.raisedBy?.toLowerCase() || "unknown",
               ],
 
-              // ------------------------------------------------
-              // Idempotency
-              // ------------------------------------------------
+              // ==================================================
+              // IDEMPOTENCY
+              // ==================================================
               //
-              // Same concern + same status = one notification.
+              // One concern + one status
+              // = one logical notification.
               //
-              // Example:
+              // Examples:
               //
-              // concern:abc:status:Resolved
+              // concern:123:status:Open
+              // concern:123:status:InProgress
+              // concern:123:status:Resolved
               //
-              // ------------------------------------------------
+              // Do NOT add:
+              //
+              // :push
+              // :whatsapp
+              // :sms
+              //
+              // ==================================================
 
-              idempotencyKey: `concern:${concernId}:status:${status}`,
+              idempotencyKey: `concern:${concernId.toString()}:status:${status}`,
             });
+
+            // ==================================================
+            // QUEUED SUCCESSFULLY
+            // ==================================================
 
             notificationQueued = true;
 
             notificationId = notification?._id?.toString() || null;
 
-            console.log("[ConcernNotification] Push notification queued:", {
-              concernId,
+            console.info("[ConcernNotification] Notification queued:", {
+              concernId: concernId.toString(),
+
               notificationId,
-              raisedBy: existingConcern.raisedBy,
-              raisedById: existingConcern.raisedById.toString(),
+
               status,
+
+              userId,
+
+              vendorId,
+
+              type: notification?.type,
+
+              channel: notification?.channel,
+
+              channelPolicy: notification?.channelPolicy || null,
+
+              requestId: req.id || null,
             });
           }
         }
       } catch (error) {
-        notificationError = error.message;
+        // ======================================================
+        // NOTIFICATION FAILURE
+        // ======================================================
 
-        /**
-         * IMPORTANT
+        notificationError = error?.message || "Unknown notification error";
+
+        console.error("[ConcernNotification] Failed to queue notification:", {
+          concernId: concernId.toString(),
+
+          status,
+
+          error: error?.message,
+
+          code: error?.code,
+
+          requestId: req.id || null,
+        });
+
+        /*
+         * IMPORTANT:
          *
-         * Concern status update has already succeeded.
+         * The concern status has already been updated.
          *
-         * Push notification failure must NOT make the
-         * API report concern-update failure.
+         * Notification failure must NOT make
+         * the concern status update fail.
          */
-        console.error("[ConcernNotification] Failed to queue push notification:", error);
       }
     }
 
     // ========================================================
-    // Response
+    // RESPONSE
     // ========================================================
 
     return res.status(200).json({
@@ -811,6 +940,10 @@ const updateConcernStatus = async (req, res) => {
       },
     });
   } catch (error) {
+    // ========================================================
+    // CONTROLLER ERROR
+    // ========================================================
+
     console.error("updateConcernStatus error:", error);
 
     return res.status(500).json({

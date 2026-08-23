@@ -2482,7 +2482,7 @@ class PaymentService {
    * Send success notification
    */
   async sendSuccessNotification(entity, amount, transaction = null, requestId = null) {
-    console.log("in Notification", entity);
+    // console.log("in Notification", entity);
 
     const transactionId = transaction?._id?.toString() || null;
 
