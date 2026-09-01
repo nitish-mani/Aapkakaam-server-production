@@ -12,19 +12,19 @@ const CONFIG = require("../config/notification.config");
 // REFACTORED SERVICES
 // ============================================================
 
-const LockManager = require("../services/NotificationJob/LockManager");
+const LockManager = require("../services/notificationJob/LockManager");
 
-const NotificationRepository = require("../services/NotificationJob/NotificationRepository");
+const NotificationRepository = require("../services/notificationJob/NotificationRepository");
 
-const NotificationValidator = require("../services/NotificationJob/NotificationValidator");
+const NotificationValidator = require("../services/notificationJob/NotificationValidator");
 
-const FailureHandler = require("../services/NotificationJob/FailureHandler");
+const FailureHandler = require("../services/notificationJob/FailureHandler");
 
-const MetricsService = require("../services/NotificationJob/MetricsService");
+const MetricsService = require("../services/notificationJob/MetricsService");
 
-const ResponseSanitizer = require("../services/NotificationJob/ResponseSanitizer");
+const ResponseSanitizer = require("../services/notificationJob/ResponseSanitizer");
 
-const NotificationStateMachine = require("../services/NotificationJob/NotificationStateMachine");
+const NotificationStateMachine = require("../services/notificationJob/NotificationStateMachine");
 
 // ============================================================
 // NOTIFICATION JOB

@@ -16,7 +16,7 @@ const VendorSignupPayment = require("../models/vendorSignupPayment");
 const ENV = require("../src/config/env");
 
 const OtpAuthorizationService = require("../src/services/OtpAuthorizationService");
-const PaymentService = require("../src/services/PaymentService");
+const PaymentService = require("../src/services/paymentService");
 
 const authenticate = require("../middleware/authenticate");
 const vendor_auth = require("../auth/vendor_auth");
