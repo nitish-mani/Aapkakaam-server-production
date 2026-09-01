@@ -40,6 +40,7 @@ router.patch(
   is_user,
   bookings_controller.bookings_controller_cancelU,
 );
+
 router.patch(
   "/cancelOrderV",
   authenticate,

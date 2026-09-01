@@ -1,5 +1,5 @@
 const { validationResult } = require("express-validator");
-const bcrypt = require("bcryptjs");
+const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const OtpAuthorizationService = require("../src/services/OtpAuthorizationService");
 const User = require("../models/user");
@@ -68,11 +68,11 @@ exports.signup = async (req, res, next) => {
       });
     }
 
-    // if (!validPhoneNoId) {
-    //   return res.status(400).json({
-    //     message: "Phone verification is required",
-    //   });
-    // }
+    if (!validPhoneNoId) {
+      return res.status(400).json({
+        message: "Phone verification is required",
+      });
+    }
 
     if (password.length < 6) {
       UserLogger.warn({
@@ -89,14 +89,14 @@ exports.signup = async (req, res, next) => {
     // Check phone verification
 
     // Check if user already exists
-    const existingUser = await User.exists({
-      phoneNo: normalizedPhone,
-    });
-
-    const existingVendor = await Vendor.exists({
-      phoneNo: normalizedPhone,
-    });
-
+    const [existingUser, existingVendor] = await Promise.all([
+      User.exists({
+        phoneNo: normalizedPhone,
+      }),
+      Vendor.exists({
+        phoneNo: normalizedPhone,
+      }),
+    ]);
     if (existingUser || existingVendor) {
       UserLogger.warn(
         {
@@ -112,15 +112,18 @@ exports.signup = async (req, res, next) => {
         message: "Mobile number already exists!",
       });
     }
-    // await OtpAuthorizationService.consume({
-    //   otpId: validPhoneNoId,
-    //   accountType: "user",
-    //   accountId: null,
-    //   purpose: "verify_phone",
-    //   target: normalizedPhone,
-    // });
+    await OtpAuthorizationService.consume({
+      otpId: validPhoneNoId,
+      accountType: "user",
+      accountId: null,
+      purpose: "verify_phone",
+      target: normalizedPhone,
+    });
+
     // Hash password and create user
-    const hashedPw = await bcrypt.hash(password, 12);
+
+    const hashedPw = await bcrypt.hash(password, ENV.BCRYPT_ROUNDS);
+
     const user = new User({
       name,
       phoneNo: normalizedPhone,
@@ -209,6 +212,7 @@ async function handleReferralBonus(sharedBy, cd, newUser, name, phoneNo) {
       userId: cd === "user" ? sharedBy : undefined,
       vendorId: cd === "vendor" ? sharedBy : undefined,
       employeeId: cd === "employee" ? sharedBy : undefined,
+      name: newUser.name,
       phoneNo: newUser.phoneNo,
       status: "completed",
       shareDate: new Date(),
@@ -247,11 +251,19 @@ async function handleReferralBonus(sharedBy, cd, newUser, name, phoneNo) {
 //// for user login //////
 //////////////////////////
 
+////////////////////////////
+//// for user login ////////
+////////////////////////////
+
 exports.login = async (req, res, next) => {
   const startTime = Date.now();
+
   try {
     const { phoneNo, password, fcmToken } = req.body;
 
+    // --------------------------------------------------
+    // 1. Validate required fields
+    // --------------------------------------------------
     if (!phoneNo || !password) {
       UserLogger.warn(
         {
@@ -262,67 +274,123 @@ exports.login = async (req, res, next) => {
         },
         "User login rejected: required fields missing",
       );
+
       return res.status(400).json({
         message: "Phone number and password are required",
       });
     }
 
-    const user = await User.findOne({ phoneNo });
+    // --------------------------------------------------
+    // 2. Normalize phone number
+    // --------------------------------------------------
+    const normalizedPhone = String(phoneNo).trim().replace(/\s+/g, "");
+
+    // --------------------------------------------------
+    // 3. Find user
+    // --------------------------------------------------
+    const user = await User.findOne({
+      phoneNo: normalizedPhone,
+    });
+
+    // --------------------------------------------------
+    // 4. Generic authentication failure
+    //
+    // IMPORTANT:
+    // Do not tell the client whether the phone exists.
+    // This prevents account enumeration.
+    // --------------------------------------------------
     if (!user) {
       UserLogger.warn(
         {
-          event: "USER_LOGIN_USER_NOT_FOUND",
-          phoneNo: maskPhone(phoneNo),
+          event: "USER_LOGIN_FAILED",
+          reason: "INVALID_CREDENTIALS",
+          phoneNo: maskPhone(normalizedPhone),
           requestId: req.requestId,
           ip: req.ip,
           userAgent: req.get("user-agent"),
+          duration: Date.now() - startTime,
         },
-        "User login failed: user not found",
+        "User login failed: invalid credentials",
       );
+
       return res.status(401).json({
-        message: "User with this phone number not found",
+        message: "Invalid phone number or password",
       });
     }
 
+    // --------------------------------------------------
+    // 5. Compare password
+    //
+    // Native bcrypt remains CPU-expensive intentionally.
+    // Keep login rate-limited.
+    // --------------------------------------------------
     const isPasswordValid = await bcrypt.compare(password, user.password);
+
     if (!isPasswordValid) {
       UserLogger.warn(
         {
-          event: "USER_LOGIN_INVALID_PASSWORD",
+          event: "USER_LOGIN_FAILED",
+          reason: "INVALID_CREDENTIALS",
           userId: user._id,
-          phoneNo: maskPhone(phoneNo),
+          phoneNo: maskPhone(normalizedPhone),
           requestId: req.requestId,
           ip: req.ip,
           userAgent: req.get("user-agent"),
+          duration: Date.now() - startTime,
         },
-        "User login failed: invalid password",
+        "User login failed: invalid credentials",
       );
+
       return res.status(401).json({
-        message: "Invalid password",
+        message: "Invalid phone number or password",
       });
     }
 
-    // Update FCM token if provided
+    // --------------------------------------------------
+    // 6. Update FCM token asynchronously
+    //
+    // Do NOT make successful login wait for this DB write.
+    // --------------------------------------------------
     if (fcmToken && fcmToken !== user.fcmToken) {
-      await User.findByIdAndUpdate(user._id, { fcmToken });
-
-      UserLogger.info({
-        event: "USER_FCM_UPDATED",
-        userId: user._id,
+      User.updateOne(
+        { _id: user._id },
+        {
+          $set: {
+            fcmToken,
+          },
+        },
+      ).catch((error) => {
+        UserLogger.error(
+          {
+            event: "USER_FCM_UPDATE_FAILED",
+            userId: user._id,
+            requestId: req.requestId,
+            error: error.message,
+          },
+          "Failed to update user FCM token",
+        );
       });
     }
 
-    // Generate JWT token
+    // --------------------------------------------------
+    // 7. Generate JWT
+    // --------------------------------------------------
     const token = jwt.sign(
       {
-        phoneNo: user.phoneNo,
         userId: user._id.toString(),
+        phoneNo: user.phoneNo,
       },
-      secretKey,
-      { expiresIn: "72h" },
+      ENV.JWT_USER_SECRET,
+      {
+        expiresIn: ENV.JWT_EXPIRES_IN,
+        issuer: "aapkakaam-api",
+        audience: "user",
+      },
     );
 
-    // Prepare user data for response
+    // --------------------------------------------------
+    // 8. Prepare response
+    // --------------------------------------------------
     const userData = {
       token,
       userId: user._id,
@@ -342,9 +410,13 @@ exports.login = async (req, res, next) => {
       completed: user.completed,
       canceled: user.canceled,
       pincode: user.pincode,
-      earning:user.earning,
+      earning: user.earning,
       message: "Login successful",
     };
+
+    // --------------------------------------------------
+    // 9. Success logging
+    // --------------------------------------------------
     UserLogger.info(
       {
         event: "USER_LOGIN_SUCCESS",
@@ -358,8 +430,12 @@ exports.login = async (req, res, next) => {
       },
       "User login successful",
     );
-    res.status(200).json(userData);
+
+    return res.status(200).json(userData);
   } catch (err) {
+    // --------------------------------------------------
+    // 10. Error handling
+    // --------------------------------------------------
     UserLogger.error(
       {
         event: "USER_LOGIN_ERROR",
@@ -367,13 +443,17 @@ exports.login = async (req, res, next) => {
         ip: req.ip,
         userAgent: req.get("user-agent"),
         error: err.message,
-        ...(err.statusCode >= 500 && { stack: err.stack }),
+        ...(err.statusCode >= 500 && {
+          stack: err.stack,
+        }),
       },
       "User login failed",
     );
+
     if (!err.statusCode) {
       err.statusCode = 500;
     }
+
     next(err);
   }
 };

@@ -10,8 +10,9 @@ const Bookings = require("../models/bookings");
 const Transaction = require("../models/transaction");
 const Share = require("../models/share");
 const WalletLedger = require("../models/walletLedger");
-const VendorLeave = require("../models/vendorLeave");
+const VendorLeave = require("../models/VendorLeave");
 const { AdminLogger } = require("../src/logger/index");
+const ENV = require("../src/config/env");
 
 // ============================================
 // CONSTANTS & CONFIGURATION
@@ -821,8 +822,8 @@ exports.updateUserByPhone = async (req, res, next) => {
 
     // If password is being updated, hash it
     if (filteredUpdate.password) {
-      const bcrypt = require("bcryptjs");
-      filteredUpdate.password = await bcrypt.hash(filteredUpdate.password, 12);
+      const bcrypt = require("bcrypt");
+      filteredUpdate.password = await bcrypt.hash(filteredUpdate.password, ENV.BCRYPT_ROUNDS);
     }
 
     const updatedUser = await User.findOneAndUpdate(
@@ -899,8 +900,8 @@ exports.updateVendorByPhone = async (req, res, next) => {
 
     // If password is being updated, hash it
     if (filteredUpdate.password) {
-      const bcrypt = require("bcryptjs");
-      filteredUpdate.password = await bcrypt.hash(filteredUpdate.password, 12);
+      const bcrypt = require("bcrypt");
+      filteredUpdate.password = await bcrypt.hash(filteredUpdate.password, ENV.BCRYPT_ROUNDS);
     }
 
     const updatedVendor = await Vendor.findOneAndUpdate(
@@ -2232,8 +2233,10 @@ exports.getUserDetailAnalytics = async (req, res, next) => {
 
 /**
  * GET /api/admin/analytics/vendors
- * Detailed vendor analytics with pagination, search, and leave information
+ * Get paginated vendor list with filters, summary stats, and leave information
+ * This is optimized for the main vendors table view
  */
+
 exports.getVendorAnalytics = async (req, res, next) => {
   try {
     const {
@@ -2248,51 +2251,155 @@ exports.getVendorAnalytics = async (req, res, next) => {
       search = "",
     } = req.query;
 
-    // Parse pagination values
-    const pageNum = parseInt(page, 10) || 1;
-    const limitNum = parseInt(limit, 10) || 10;
+    // ============================================================
+    // PAGINATION
+    // ============================================================
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+
     const skip = (pageNum - 1) * limitNum;
 
-    // Build date filter
+    // ============================================================
+    // DATE FILTER
+    // ============================================================
+
     const dateFilter = {};
-    if (from) dateFilter.$gte = new Date(from);
-    if (to) dateFilter.$lte = new Date(to);
 
-    // Build status filter
-    const statusFilter = status !== "all" ? { status } : {};
+    if (from) {
+      const fromDate = new Date(from);
 
-    // Build type filter
-    const typeFilter = type !== "all" ? { type } : {};
+      if (!Number.isNaN(fromDate.getTime())) {
+        dateFilter.$gte = fromDate;
+      }
+    }
 
-    // Build search filter
-    const searchFilter = search
-      ? {
-          $or: [
-            { name: { $regex: search, $options: "i" } },
-            { email: { $regex: search, $options: "i" } },
-            { phoneNo: { $regex: search, $options: "i" } },
-            { pincode: { $regex: search, $options: "i" } },
-          ],
-        }
-      : {};
+    if (to) {
+      const toDate = new Date(to);
 
-    // Combine all filters
+      if (!Number.isNaN(toDate.getTime())) {
+        dateFilter.$lte = toDate;
+      }
+    }
+
+    // ============================================================
+    // STATUS FILTER
+    // ============================================================
+
+    const statusFilter =
+      status && status !== "all"
+        ? {
+            status,
+          }
+        : {};
+
+    // ============================================================
+    // TYPE FILTER
+    //
+    // Vendor.type is an ARRAY.
+    //
+    // Example:
+    //
+    // type: [
+    //   "mason",
+    //   "contractor"
+    // ]
+    // ============================================================
+
+    const typeFilter =
+      type && type !== "all"
+        ? {
+            type: {
+              $in: [type],
+            },
+          }
+        : {};
+
+    // ============================================================
+    // SEARCH FILTER
+    // ============================================================
+
+    const searchFilter =
+      search && String(search).trim()
+        ? {
+            $or: [
+              {
+                name: {
+                  $regex: String(search).trim(),
+                  $options: "i",
+                },
+              },
+              {
+                email: {
+                  $regex: String(search).trim(),
+                  $options: "i",
+                },
+              },
+              {
+                phoneNo: {
+                  $regex: String(search).trim(),
+                  $options: "i",
+                },
+              },
+              {
+                pincode: {
+                  $regex: String(search).trim(),
+                  $options: "i",
+                },
+              },
+            ],
+          }
+        : {};
+
+    // ============================================================
+    // COMBINED FILTER
+    // ============================================================
+
     const matchFilter = {
       ...statusFilter,
       ...typeFilter,
       ...searchFilter,
-      ...(dateFilter.$gte || dateFilter.$lte ? { accountCreatedOn: dateFilter } : {}),
+
+      ...(dateFilter.$gte || dateFilter.$lte
+        ? {
+            accountCreatedOn: dateFilter,
+          }
+        : {}),
     };
 
-    // Get total counts
-    const [totalVendors, activeVendors, blockedVendors, verifiedVendors, vendors] =
+    // ============================================================
+    // VENDOR DATA
+    // ============================================================
+
+    const [totalVendors, activeVendors, blockedVendors, verifiedVendors, rawVendors] =
       await Promise.all([
+        // Total
         Vendor.countDocuments(matchFilter),
-        Vendor.countDocuments({ ...matchFilter, status: "active" }),
-        Vendor.countDocuments({ ...matchFilter, status: "blocked" }),
-        Vendor.countDocuments({ ...matchFilter, isVerified: true }),
+
+        // Active
+        Vendor.countDocuments({
+          ...matchFilter,
+          status: "active",
+        }),
+
+        // Blocked
+        Vendor.countDocuments({
+          ...matchFilter,
+          status: "blocked",
+        }),
+
+        // Verified
+        Vendor.countDocuments({
+          ...matchFilter,
+          isVerified: true,
+        }),
+
+        // Vendors
         Vendor.find(matchFilter)
-          .sort({ [sortBy]: -1 })
+          .sort({
+            [sortBy]: -1,
+          })
           .skip(skip)
           .limit(limitNum)
           .select(
@@ -2300,50 +2407,151 @@ exports.getVendorAnalytics = async (req, res, next) => {
               "bookingCount bookingCountVendor pending completed canceled " +
               "pendingVendor completedVendor canceledVendor " +
               "pendingShareBy completedShareBy canceledShareBy " +
-              "isVerified status accountCreatedOn shareCount pincode",
+              "isVerified status accountCreatedOn shareCount pincode address experience gender " +
+              "wageRate wageRateType totalDiscount totalOriginalAmount transactionCount",
           )
           .lean(),
       ]);
 
-    // Get leave information for all vendors
-    const vendorIds = vendors.map((v) => v._id);
-    const leaveStats = await VendorLeave.aggregate([
-      {
-        $match: {
-          vendorId: { $in: vendorIds },
-          status: "active",
-        },
-      },
-      {
-        $group: {
-          _id: "$vendorId",
-          activeLeaveCount: { $sum: 1 },
-          leaves: {
-            $push: {
-              from: "$from",
-              to: "$to",
-              reason: "$reason",
-              status: "$status",
-            },
-          },
-        },
-      },
-    ]);
+    // ============================================================
+    // NORMALIZE VENDOR DATA
+    //
+    // IMPORTANT:
+    //
+    // MongoDB:
+    //
+    // type         = ["mason", "contractor"]
+    // wageRate     = [700, 350]
+    // wageRateType = ["Day", "Per square feet"]
+    //
+    // becomes:
+    //
+    // jobs = [
+    //   {
+    //     type: "mason",
+    //     wageRate: 700,
+    //     wageRateType: "Day"
+    //   },
+    //   {
+    //     type: "contractor",
+    //     wageRate: 350,
+    //     wageRateType: "Per square feet"
+    //   }
+    // ]
+    // ============================================================
 
-    // Create a map of vendorId -> leave stats
-    const leaveMap = {};
-    leaveStats.forEach((stat) => {
-      leaveMap[stat._id.toString()] = {
-        activeLeaveCount: stat.activeLeaveCount,
-        leaves: stat.leaves,
+    const vendors = rawVendors.map((vendor) => {
+      const types = Array.isArray(vendor.type) ? vendor.type : vendor.type ? [vendor.type] : [];
+
+      const wageRates = Array.isArray(vendor.wageRate)
+        ? vendor.wageRate
+        : vendor.wageRate !== undefined && vendor.wageRate !== null
+          ? [vendor.wageRate]
+          : [];
+
+      const wageRateTypes = Array.isArray(vendor.wageRateType)
+        ? vendor.wageRateType
+        : vendor.wageRateType
+          ? [vendor.wageRateType]
+          : [];
+
+      // Use the largest array length
+      // so no data is lost.
+      const jobCount = Math.max(types.length, wageRates.length, wageRateTypes.length);
+
+      const jobs = Array.from(
+        {
+          length: jobCount,
+        },
+        (_, index) => ({
+          type: types[index] || "",
+
+          wageRate: wageRates[index] !== undefined ? Number(wageRates[index]) : 0,
+
+          wageRateType: wageRateTypes[index] || "",
+        }),
+      ).filter((job) => job.type || job.wageRate || job.wageRateType);
+
+      return {
+        ...vendor,
+
+        // ALWAYS ARRAYS
+        type: types,
+
+        wageRate: wageRates,
+
+        wageRateType: wageRateTypes,
+
+        // NORMALIZED JOBS
+        jobs,
       };
     });
 
-    // Attach leave info to vendors
+    // ============================================================
+    // VENDOR IDS
+    // ============================================================
+
+    const vendorIds = vendors.map((vendor) => vendor._id);
+
+    // ============================================================
+    // LEAVE DATA
+    // ============================================================
+
+    let leaveStats = [];
+
+    const leaveMap = {};
+
+    if (vendorIds.length > 0) {
+      leaveStats = await VendorLeave.aggregate([
+        {
+          $match: {
+            vendorId: {
+              $in: vendorIds,
+            },
+
+            status: "active",
+          },
+        },
+
+        {
+          $group: {
+            _id: "$vendorId",
+
+            activeLeaveCount: {
+              $sum: 1,
+            },
+
+            leaves: {
+              $push: {
+                from: "$from",
+                to: "$to",
+                reason: "$reason",
+                status: "$status",
+              },
+            },
+          },
+        },
+      ]);
+
+      leaveStats.forEach((stat) => {
+        leaveMap[stat._id.toString()] = {
+          activeLeaveCount: stat.activeLeaveCount,
+
+          leaves: stat.leaves,
+        };
+      });
+    }
+
+    // ============================================================
+    // ATTACH LEAVE INFORMATION
+    // ============================================================
+
     const vendorsWithLeaves = vendors.map((vendor) => {
       const vendorId = vendor._id.toString();
+
       return {
         ...vendor,
+
         leaveInfo: leaveMap[vendorId] || {
           activeLeaveCount: 0,
           leaves: [],
@@ -2351,98 +2559,473 @@ exports.getVendorAnalytics = async (req, res, next) => {
       };
     });
 
-    // Get growth over time
+    // ============================================================
+    // VENDOR GROWTH
+    // ============================================================
+
     const growth = await Vendor.aggregate([
       {
-        $match: {
-          ...matchFilter,
-        },
+        $match: matchFilter,
       },
+
       {
         $group: {
           _id: {
             $dateTrunc: {
               date: "$accountCreatedOn",
+
               unit:
                 period === "day"
                   ? "day"
                   : period === "week"
                     ? "week"
-                    : period === "month"
-                      ? "month"
-                      : "year",
+                    : period === "year"
+                      ? "year"
+                      : "month",
             },
           },
-          count: { $sum: 1 },
+
+          count: {
+            $sum: 1,
+          },
         },
       },
-      { $sort: { _id: 1 } },
+
+      {
+        $sort: {
+          _id: 1,
+        },
+      },
     ]);
 
-    // Get vendor performance metrics
+    // ============================================================
+    // PERFORMANCE
+    // ============================================================
+
     const performance = await Vendor.aggregate([
       {
         $match: matchFilter,
       },
+
       {
         $group: {
           _id: null,
-          avgRating: { $avg: "$rating" },
-          avgEarnings: { $avg: "$earning" },
-          avgCommission: { $avg: "$commission" },
-          avgBalance: { $avg: "$balance" },
-          totalEarnings: { $sum: "$earning" },
-          totalCommission: { $sum: "$commission" },
-          totalBalance: { $sum: "$balance" },
-          // User-facing booking stats
-          totalPending: { $sum: "$pending" },
-          totalCompleted: { $sum: "$completed" },
-          totalCanceled: { $sum: "$canceled" },
-          // Vendor-facing booking stats
-          totalPendingVendor: { $sum: "$pendingVendor" },
-          totalCompletedVendor: { $sum: "$completedVendor" },
-          totalCanceledVendor: { $sum: "$canceledVendor" },
-          // Share stats
-          totalPendingShareBy: { $sum: "$pendingShareBy" },
-          totalCompletedShareBy: { $sum: "$completedShareBy" },
-          totalCanceledShareBy: { $sum: "$canceledShareBy" },
-          // Booking counts
-          totalBookings: { $sum: "$bookingCount" },
-          totalBookingCountVendor: { $sum: "$bookingCountVendor" },
-          totalShareCount: { $sum: "$shareCount" },
-          avgPending: { $avg: "$pending" },
-          avgCompleted: { $avg: "$completed" },
-          avgCanceled: { $avg: "$canceled" },
+
+          avgRating: {
+            $avg: "$rating",
+          },
+
+          avgEarnings: {
+            $avg: "$earning",
+          },
+
+          avgCommission: {
+            $avg: "$commission",
+          },
+
+          avgBalance: {
+            $avg: "$balance",
+          },
+
+          totalEarnings: {
+            $sum: {
+              $ifNull: ["$earning", 0],
+            },
+          },
+
+          totalCommission: {
+            $sum: {
+              $ifNull: ["$commission", 0],
+            },
+          },
+
+          totalBalance: {
+            $sum: {
+              $ifNull: ["$balance", 0],
+            },
+          },
+
+          // USER BOOKING STATS
+
+          totalPending: {
+            $sum: {
+              $ifNull: ["$pending", 0],
+            },
+          },
+
+          totalCompleted: {
+            $sum: {
+              $ifNull: ["$completed", 0],
+            },
+          },
+
+          totalCanceled: {
+            $sum: {
+              $ifNull: ["$canceled", 0],
+            },
+          },
+
+          // VENDOR BOOKING STATS
+
+          totalPendingVendor: {
+            $sum: {
+              $ifNull: ["$pendingVendor", 0],
+            },
+          },
+
+          totalCompletedVendor: {
+            $sum: {
+              $ifNull: ["$completedVendor", 0],
+            },
+          },
+
+          totalCanceledVendor: {
+            $sum: {
+              $ifNull: ["$canceledVendor", 0],
+            },
+          },
+
+          // SHARE STATS
+
+          totalPendingShareBy: {
+            $sum: {
+              $ifNull: ["$pendingShareBy", 0],
+            },
+          },
+
+          totalCompletedShareBy: {
+            $sum: {
+              $ifNull: ["$completedShareBy", 0],
+            },
+          },
+
+          totalCanceledShareBy: {
+            $sum: {
+              $ifNull: ["$canceledShareBy", 0],
+            },
+          },
+
+          // BOOKINGS
+
+          totalBookings: {
+            $sum: {
+              $ifNull: ["$bookingCount", 0],
+            },
+          },
+
+          totalBookingCountVendor: {
+            $sum: {
+              $ifNull: ["$bookingCountVendor", 0],
+            },
+          },
+
+          totalShareCount: {
+            $sum: {
+              $ifNull: ["$shareCount", 0],
+            },
+          },
+
+          avgPending: {
+            $avg: "$pending",
+          },
+
+          avgCompleted: {
+            $avg: "$completed",
+          },
+
+          avgCanceled: {
+            $avg: "$canceled",
+          },
+
+          totalTransactionCount: {
+            $sum: {
+              $ifNull: ["$transactionCount", 0],
+            },
+          },
+
+          totalDiscount: {
+            $sum: {
+              $ifNull: ["$totalDiscount", 0],
+            },
+          },
+
+          totalOriginalAmount: {
+            $sum: {
+              $ifNull: ["$totalOriginalAmount", 0],
+            },
+          },
         },
       },
     ]);
 
-    // Get overall leave stats for all vendors
-    const overallLeaveStats = await VendorLeave.aggregate([
+    // ============================================================
+    // OVERALL LEAVE STATS
+    // ============================================================
+
+    const overallLeaveStats = vendorIds.length
+      ? await VendorLeave.aggregate([
+          {
+            $match: {
+              vendorId: {
+                $in: vendorIds,
+              },
+            },
+          },
+
+          {
+            $group: {
+              _id: null,
+
+              totalLeaves: {
+                $sum: 1,
+              },
+
+              activeLeaves: {
+                $sum: {
+                  $cond: [
+                    {
+                      $eq: ["$status", "active"],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+
+              cancelledLeaves: {
+                $sum: {
+                  $cond: [
+                    {
+                      $eq: ["$status", "cancelled"],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+
+              currentActiveLeaves: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        {
+                          $eq: ["$status", "active"],
+                        },
+
+                        {
+                          $lte: ["$from", new Date()],
+                        },
+
+                        {
+                          $gte: ["$to", new Date()],
+                        },
+                      ],
+                    },
+
+                    1,
+
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        ])
+      : [];
+
+    // ============================================================
+    // VENDOR TYPE DISTRIBUTION
+    //
+    // IMPORTANT:
+    //
+    // If one vendor has:
+    //
+    // ["mason", "contractor"]
+    //
+    // this counts:
+    //
+    // mason      +1 vendor
+    // contractor +1 vendor
+    //
+    // ============================================================
+
+    const typeDistribution = await Vendor.aggregate([
       {
-        $match: {
-          vendorId: { $in: vendorIds },
+        $match: matchFilter,
+      },
+
+      {
+        $unwind: {
+          path: "$type",
+
+          preserveNullAndEmptyArrays: false,
         },
       },
+
       {
         $group: {
-          _id: null,
-          totalLeaves: { $sum: 1 },
-          activeLeaves: {
-            $sum: { $cond: [{ $eq: ["$status", "active"] }, 1, 0] },
+          _id: "$type",
+
+          vendorCount: {
+            $sum: 1,
           },
-          cancelledLeaves: {
-            $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] },
+
+          avgRating: {
+            $avg: {
+              $ifNull: ["$rating", 0],
+            },
           },
-          currentActiveLeaves: {
+
+          totalEarnings: {
+            $sum: {
+              $ifNull: ["$earning", 0],
+            },
+          },
+
+          totalBookings: {
+            $sum: {
+              $ifNull: ["$bookingCount", 0],
+            },
+          },
+
+          completedBookings: {
+            $sum: {
+              $ifNull: ["$completed", 0],
+            },
+          },
+
+          cancelledBookings: {
+            $sum: {
+              $ifNull: ["$canceled", 0],
+            },
+          },
+
+          activeBookings: {
+            $sum: {
+              $ifNull: ["$pending", 0],
+            },
+          },
+        },
+      },
+
+      {
+        $project: {
+          _id: 0,
+
+          type: "$_id",
+
+          vendorCount: 1,
+
+          avgRating: {
+            $round: [
+              {
+                $ifNull: ["$avgRating", 0],
+              },
+              2,
+            ],
+          },
+
+          totalEarnings: 1,
+
+          totalBookings: 1,
+
+          completedBookings: 1,
+
+          cancelledBookings: 1,
+
+          activeBookings: 1,
+
+          completionRate: {
+            $cond: [
+              {
+                $eq: ["$totalBookings", 0],
+              },
+
+              0,
+
+              {
+                $round: [
+                  {
+                    $multiply: [
+                      {
+                        $divide: ["$completedBookings", "$totalBookings"],
+                      },
+
+                      100,
+                    ],
+                  },
+
+                  2,
+                ],
+              },
+            ],
+          },
+        },
+      },
+
+      {
+        $sort: {
+          vendorCount: -1,
+        },
+      },
+    ]);
+
+    // ============================================================
+    // BOOKING TRENDS
+    // ============================================================
+
+    const bookingTrends = await Bookings.aggregate([
+      {
+        $match: {
+          ...(from
+            ? {
+                createdAt: {
+                  $gte: new Date(from),
+                },
+              }
+            : {}),
+
+          ...(to
+            ? {
+                createdAt: {
+                  $lte: new Date(to),
+                },
+              }
+            : {}),
+
+          vendorId: {
+            $exists: true,
+            $ne: null,
+          },
+        },
+      },
+
+      {
+        $group: {
+          _id: "$vendorId",
+
+          totalBookings: {
+            $sum: 1,
+          },
+
+          completedBookings: {
             $sum: {
               $cond: [
                 {
-                  $and: [
-                    { $eq: ["$status", "active"] },
-                    { $lte: ["$from", new Date()] },
-                    { $gte: ["$to", new Date()] },
-                  ],
+                  $eq: ["$orderCompleted", true],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+
+          cancelledBookings: {
+            $sum: {
+              $cond: [
+                {
+                  $eq: ["$cancelOrder", true],
                 },
                 1,
                 0,
@@ -2451,116 +3034,182 @@ exports.getVendorAnalytics = async (req, res, next) => {
           },
         },
       },
-    ]);
 
-    // Vendor type distribution
-    const typeDistribution = await Vendor.aggregate([
-      {
-        $match: matchFilter,
-      },
-      {
-        $group: {
-          _id: "$type",
-          count: { $sum: 1 },
-          avgRating: { $avg: "$rating" },
-          totalEarnings: { $sum: "$earning" },
-        },
-      },
-      { $sort: { count: -1 } },
-    ]);
-
-    // Vendor booking trends (from Bookings collection)
-    const bookingTrends = await Bookings.aggregate([
-      {
-        $match: {
-          ...(from ? { createdAt: { $gte: new Date(from) } } : {}),
-          ...(to ? { createdAt: { $lte: new Date(to) } } : {}),
-          vendorId: { $exists: true, $ne: null },
-        },
-      },
-      {
-        $group: {
-          _id: "$vendorId",
-          totalBookings: { $sum: 1 },
-          completedBookings: {
-            $sum: { $cond: [{ $eq: ["$orderCompleted", true] }, 1, 0] },
-          },
-          cancelledBookings: {
-            $sum: { $cond: [{ $eq: ["$cancelOrder", true] }, 1, 0] },
-          },
-        },
-      },
       {
         $lookup: {
           from: "vendors",
+
           localField: "_id",
+
           foreignField: "_id",
+
           as: "vendor",
         },
       },
-      { $unwind: { path: "$vendor", preserveNullAndEmptyArrays: true } },
+
+      {
+        $unwind: {
+          path: "$vendor",
+
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+
       {
         $project: {
+          _id: 0,
+
+          vendorId: "$_id",
+
           vendorName: "$vendor.name",
+
+          // COMPLETE ARRAY
           vendorType: "$vendor.type",
+
+          // COMPLETE ARRAY
+          wageRate: "$vendor.wageRate",
+
+          // COMPLETE ARRAY
+          wageRateType: "$vendor.wageRateType",
+
           totalBookings: 1,
+
           completedBookings: 1,
+
           cancelledBookings: 1,
+
           completionRate: {
             $cond: [
-              { $eq: ["$totalBookings", 0] },
+              {
+                $eq: ["$totalBookings", 0],
+              },
+
               0,
-              { $multiply: [{ $divide: ["$completedBookings", "$totalBookings"] }, 100] },
+
+              {
+                $round: [
+                  {
+                    $multiply: [
+                      {
+                        $divide: ["$completedBookings", "$totalBookings"],
+                      },
+
+                      100,
+                    ],
+                  },
+
+                  2,
+                ],
+              },
             ],
           },
         },
       },
-      { $sort: { totalBookings: -1 } },
-      { $limit: 10 },
+
+      {
+        $sort: {
+          totalBookings: -1,
+        },
+      },
+
+      {
+        $limit: 10,
+      },
     ]);
 
-    // Pincode distribution
+    // ============================================================
+    // PINCODE DISTRIBUTION
+    // ============================================================
+
     const pincodeDistribution = await Vendor.aggregate([
       {
         $match: {
           ...matchFilter,
-          pincode: { $exists: true, $ne: null, $ne: "" },
+
+          pincode: {
+            $exists: true,
+
+            $ne: null,
+
+            $ne: "",
+          },
         },
       },
+
       {
         $group: {
           _id: "$pincode",
-          count: { $sum: 1 },
+
+          count: {
+            $sum: 1,
+          },
         },
       },
-      { $sort: { count: -1 } },
-      { $limit: 10 },
+
+      {
+        $sort: {
+          count: -1,
+        },
+      },
+
+      {
+        $limit: 10,
+      },
+
+      {
+        $project: {
+          _id: 0,
+
+          pincode: "$_id",
+
+          count: 1,
+        },
+      },
     ]);
+
+    // ============================================================
+    // DEFAULT PERFORMANCE
+    // ============================================================
 
     const perf = performance[0] || {
       avgRating: 0,
       avgEarnings: 0,
       avgCommission: 0,
       avgBalance: 0,
+
       totalEarnings: 0,
       totalCommission: 0,
       totalBalance: 0,
+
       totalPending: 0,
       totalCompleted: 0,
       totalCanceled: 0,
+
       totalPendingVendor: 0,
       totalCompletedVendor: 0,
       totalCanceledVendor: 0,
+
       totalPendingShareBy: 0,
       totalCompletedShareBy: 0,
       totalCanceledShareBy: 0,
+
       totalBookings: 0,
       totalBookingCountVendor: 0,
+
       totalShareCount: 0,
+
       avgPending: 0,
       avgCompleted: 0,
       avgCanceled: 0,
+
+      totalTransactionCount: 0,
+      totalDiscount: 0,
+      totalOriginalAmount: 0,
     };
+
+    // ============================================================
+    // DEFAULT LEAVE DATA
+    // ============================================================
 
     const leaveOverall = overallLeaveStats[0] || {
       totalLeaves: 0,
@@ -2569,94 +3218,215 @@ exports.getVendorAnalytics = async (req, res, next) => {
       currentActiveLeaves: 0,
     };
 
+    // ============================================================
+    // RESPONSE
+    // ============================================================
+
     return res.status(200).json({
       success: true,
+
       data: {
+        // ========================================================
+        // VENDORS
+        // ========================================================
+
         vendors: vendorsWithLeaves,
+
+        // ========================================================
+        // TOTAL COUNTS
+        // ========================================================
+
         totals: {
           total: totalVendors,
+
           active: activeVendors,
+
           blocked: blockedVendors,
+
           verified: verifiedVendors,
         },
+
+        // ========================================================
+        // GROWTH
+        // ========================================================
+
         growth,
+
+        // ========================================================
+        // PERFORMANCE
+        // ========================================================
+
         performance: {
           avgRating: Number((perf.avgRating || 0).toFixed(2)),
+
           avgEarnings: perf.avgEarnings || 0,
+
           avgCommission: perf.avgCommission || 0,
+
           avgBalance: perf.avgBalance || 0,
+
           totalEarnings: perf.totalEarnings || 0,
+
           totalCommission: perf.totalCommission || 0,
+
           totalBalance: perf.totalBalance || 0,
+
           bookingStats: {
-            // User-facing booking stats
             total: perf.totalBookings || 0,
+
             pending: perf.totalPending || 0,
+
             completed: perf.totalCompleted || 0,
+
             canceled: perf.totalCanceled || 0,
+
             avgPending: Number((perf.avgPending || 0).toFixed(2)),
+
             avgCompleted: Number((perf.avgCompleted || 0).toFixed(2)),
+
             avgCanceled: Number((perf.avgCanceled || 0).toFixed(2)),
-            // Vendor-facing booking stats
+
             pendingVendor: perf.totalPendingVendor || 0,
+
             completedVendor: perf.totalCompletedVendor || 0,
+
             canceledVendor: perf.totalCanceledVendor || 0,
-            // Share stats
+
             pendingShareBy: perf.totalPendingShareBy || 0,
+
             completedShareBy: perf.totalCompletedShareBy || 0,
+
             canceledShareBy: perf.totalCanceledShareBy || 0,
           },
+
           shareCount: perf.totalShareCount || 0,
+
+          transactionCount: perf.totalTransactionCount || 0,
+
+          totalDiscount: perf.totalDiscount || 0,
+
+          totalOriginalAmount: perf.totalOriginalAmount || 0,
         },
+
+        // ========================================================
+        // LEAVES
+        // ========================================================
+
         leaveStats: {
           totalLeaves: leaveOverall.totalLeaves || 0,
+
           activeLeaves: leaveOverall.activeLeaves || 0,
+
           cancelledLeaves: leaveOverall.cancelledLeaves || 0,
+
           currentActiveLeaves: leaveOverall.currentActiveLeaves || 0,
         },
-        topVendors: vendorsWithLeaves,
+
+        // ========================================================
+        // TOP VENDORS
+        //
+        // These still contain COMPLETE:
+        //
+        // type[]
+        // wageRate[]
+        // wageRateType[]
+        // jobs[]
+        // ========================================================
+
+        topVendors: vendorsWithLeaves.slice(0, 5),
+
+        // ========================================================
+        // TYPE DISTRIBUTION
+        // ========================================================
+
         typeDistribution,
+
+        // ========================================================
+        // BOOKING TRENDS
+        // ========================================================
+
         bookingTrends,
+
+        // ========================================================
+        // PINCODE DISTRIBUTION
+        // ========================================================
+
         pincodeDistribution,
+
+        // ========================================================
+        // PAGINATION
+        // ========================================================
+
         pagination: {
           page: pageNum,
+
           limit: limitNum,
+
           total: totalVendors,
+
           totalPages: Math.ceil(totalVendors / limitNum),
         },
+
+        // ========================================================
+        // FILTERS
+        // ========================================================
+
         filters: {
           period,
+
           from: from || null,
+
           to: to || null,
+
           status,
+
           sortBy,
+
           type,
+
           search: search || null,
         },
       },
     });
   } catch (err) {
-    AdminLogger.error({ err }, "Vendor analytics failed");
+    AdminLogger.error(
+      {
+        err,
+      },
+      "Vendor analytics failed",
+    );
+
     return next(err);
   }
 };
 
 /**
  * GET /api/admin/analytics/vendors/:vendorId
- * Get detailed analytics for a specific vendor including leave information
+ * Get detailed analytics for a specific vendor including:
+ * - Complete vendor profile with all fields
+ * - Booking timeline and statistics
+ * - Revenue and transaction details
+ * - Referral/share stats
+ * - Leave information with status tracking
+ * - Top users who booked this vendor
+ * - Booking patterns
  */
 exports.getVendorDetailAnalytics = async (req, res, next) => {
   try {
     const { vendorId } = req.params;
     const { from, to } = req.query;
 
+    // Get vendor with all relevant fields
     const vendor = await Vendor.findById(vendorId)
       .select(
         "name email phoneNo type rating ratingCount earning commission balance " +
           "bookingCount bookingCountVendor pending completed canceled " +
           "pendingVendor completedVendor canceledVendor " +
           "pendingShareBy completedShareBy canceledShareBy " +
-          "isVerified status accountCreatedOn shareCount pincode address experience",
+          "isVerified status accountCreatedOn shareCount pincode address experience " +
+          "gender wageRate wageRateType totalDiscount totalOriginalAmount transactionCount " +
+          "verifyPhoneNo verifyEmail imgURL validPhoneNoId validEmailId " +
+          "isSelfBooked agreedToTnCnP createdAt updatedAt",
       )
       .lean();
 
@@ -2667,11 +3437,10 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
       });
     }
 
-    const dateFilter = {};
-    if (from) dateFilter.$gte = new Date(from);
-    if (to) dateFilter.$lte = new Date(to);
+    // ============================================================
+    // 1. BOOKING ANALYTICS
+    // ============================================================
 
-    // Get booking details for this vendor (using bookedOn or createdAt)
     const bookings = await Bookings.aggregate([
       {
         $match: {
@@ -2714,11 +3483,30 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
             },
             { $sort: { _id: -1 } },
           ],
+          byStatus: [
+            {
+              $group: {
+                _id: {
+                  $cond: [
+                    { $eq: ["$orderCompleted", true] },
+                    "completed",
+                    {
+                      $cond: [{ $eq: ["$cancelOrder", true] }, "cancelled", "active"],
+                    },
+                  ],
+                },
+                count: { $sum: 1 },
+              },
+            },
+          ],
         },
       },
     ]);
 
-    // Get transaction details
+    // ============================================================
+    // 2. TRANSACTION ANALYTICS
+    // ============================================================
+
     const transactions = await Transaction.aggregate([
       {
         $match: {
@@ -2735,11 +3523,38 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
           totalDiscounts: { $sum: "$discount" },
           count: { $sum: 1 },
           avgOrderValue: { $avg: "$finalAmount" },
+          minOrderValue: { $min: "$finalAmount" },
+          maxOrderValue: { $max: "$finalAmount" },
         },
       },
     ]);
 
-    // Get share/referral details
+    // Transaction timeline for charts
+    const transactionTimeline = await Transaction.aggregate([
+      {
+        $match: {
+          vendorId: vendor._id,
+          status: "completed",
+          ...(from ? { createdAt: { $gte: new Date(from) } } : {}),
+          ...(to ? { createdAt: { $lte: new Date(to) } } : {}),
+        },
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+          },
+          totalAmount: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    // ============================================================
+    // 3. REFERRAL/SHARE ANALYTICS
+    // ============================================================
+
     const shares = await Share.aggregate([
       {
         $match: {
@@ -2756,30 +3571,35 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
       },
     ]);
 
-    // Get vendor leave details
-    const leaves = await VendorLeave.find({ vendorId: vendor._id }).sort({ createdAt: -1 }).lean();
+    // Share timeline
+    const shareTimeline = await Share.aggregate([
+      {
+        $match: {
+          vendorId: vendor._id,
+          ...(from ? { shareDate: { $gte: new Date(from) } } : {}),
+          ...(to ? { shareDate: { $lte: new Date(to) } } : {}),
+        },
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: "%Y-%m-%d", date: "$shareDate" },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
 
-    const activeLeaves = await VendorLeave.countDocuments({
-      vendorId: vendor._id,
-      status: "active",
-      from: { $lte: new Date() },
-      to: { $gte: new Date() },
-    });
+    // ============================================================
+    // 4. LEAVE ANALYTICS
+    // ============================================================
 
-    const totalLeaves = leaves.length;
-    const activeLeavesCount = leaves.filter((l) => l.status === "active").length;
-    const cancelledLeavesCount = leaves.filter((l) => l.status === "cancelled").length;
-
-    // Get upcoming leaves
-    const upcomingLeaves = leaves.filter((l) => {
-      return l.status === "active" && new Date(l.from) > new Date();
-    });
+    const leaves = await VendorLeave.find({ vendorId: vendor._id }).sort({ from: -1 }).lean();
 
     // Get leave stats
     const leaveStats = await VendorLeave.aggregate([
-      {
-        $match: { vendorId: vendor._id },
-      },
+      { $match: { vendorId: vendor._id } },
       {
         $group: {
           _id: null,
@@ -2805,11 +3625,32 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
               ],
             },
           },
+          totalDays: {
+            $sum: {
+              $divide: [{ $subtract: ["$to", "$from"] }, 1000 * 60 * 60 * 24],
+            },
+          },
         },
       },
     ]);
 
-    // Weekly/Monthly booking patterns
+    // Get upcoming leaves
+    const upcomingLeaves = leaves.filter((l) => {
+      return l.status === "active" && new Date(l.from) > new Date();
+    });
+
+    // Get current active leaves
+    const currentActiveLeaves = leaves.filter((l) => {
+      const now = new Date();
+      const from = new Date(l.from);
+      const to = new Date(l.to);
+      return l.status === "active" && from <= now && to >= now;
+    });
+
+    // ============================================================
+    // 5. BOOKING PATTERNS
+    // ============================================================
+
     const patterns = await Bookings.aggregate([
       {
         $match: {
@@ -2825,12 +3666,18 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
             hour: { $hour: "$createdAt" },
           },
           count: { $sum: 1 },
+          completed: {
+            $sum: { $cond: [{ $eq: ["$orderCompleted", true] }, 1, 0] },
+          },
         },
       },
       { $sort: { "_id.dayOfWeek": 1, "_id.hour": 1 } },
     ]);
 
-    // Get top users who booked this vendor
+    // ============================================================
+    // 6. TOP USERS
+    // ============================================================
+
     const topUsers = await Bookings.aggregate([
       {
         $match: {
@@ -2847,6 +3694,7 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
             $sum: { $cond: [{ $eq: ["$orderCompleted", true] }, 1, 0] },
           },
           totalSpent: { $sum: "$expenseUser" },
+          lastBooking: { $max: "$createdAt" },
         },
       },
       { $sort: { count: -1 } },
@@ -2863,13 +3711,42 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
       {
         $project: {
           userName: "$user.name",
+          userEmail: "$user.email",
+          userPhone: "$user.phoneNo",
           userId: "$_id",
           count: 1,
           completed: 1,
           totalSpent: 1,
+          lastBooking: 1,
         },
       },
     ]);
+
+    // ============================================================
+    // 7. RATING ANALYSIS
+    // ============================================================
+
+    const ratingAnalysis = await Bookings.aggregate([
+      {
+        $match: {
+          vendorId: vendor._id,
+          rating: { $exists: true, $ne: null },
+          ...(from ? { createdAt: { $gte: new Date(from) } } : {}),
+          ...(to ? { createdAt: { $lte: new Date(to) } } : {}),
+        },
+      },
+      {
+        $group: {
+          _id: "$rating",
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: -1 } },
+    ]);
+
+    // ============================================================
+    // 8. PREPARE RESPONSE
+    // ============================================================
 
     const bookingStats = bookings[0] || {
       total: [{ count: 0 }],
@@ -2880,6 +3757,7 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
       byVendor: [{ count: 0 }],
       timeline: [],
       ratingDistribution: [],
+      byStatus: [],
     };
 
     const shareMap = {};
@@ -2892,11 +3770,22 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
       active: 0,
       cancelled: 0,
       currentActive: 0,
+      totalDays: 0,
+    };
+
+    const transactionData = transactions[0] || {
+      totalRevenue: 0,
+      totalDiscounts: 0,
+      count: 0,
+      avgOrderValue: 0,
+      minOrderValue: 0,
+      maxOrderValue: 0,
     };
 
     return res.status(200).json({
       success: true,
       data: {
+        // ===== VENDOR PROFILE =====
         vendor: {
           id: vendor._id,
           name: vendor.name,
@@ -2914,6 +3803,16 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
           balance: vendor.balance,
           earning: vendor.earning,
           commission: vendor.commission,
+          gender: vendor.gender,
+          wageRate: vendor.wageRate,
+          wageRateType: vendor.wageRateType,
+          totalDiscount: vendor.totalDiscount,
+          totalOriginalAmount: vendor.totalOriginalAmount,
+          transactionCount: vendor.transactionCount,
+          verifyPhoneNo: vendor.verifyPhoneNo,
+          verifyEmail: vendor.verifyEmail,
+          isSelfBooked: vendor.isSelfBooked,
+          address: vendor.address,
           bookingStats: {
             bookingCount: vendor.bookingCount,
             bookingCountVendor: vendor.bookingCountVendor,
@@ -2928,6 +3827,8 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
             canceledShareBy: vendor.canceledShareBy,
           },
         },
+
+        // ===== BOOKING ANALYTICS =====
         bookings: {
           total: bookingStats.total[0]?.count || 0,
           completed: bookingStats.completed[0]?.count || 0,
@@ -2935,15 +3836,23 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
           active: bookingStats.active[0]?.count || 0,
           byUser: bookingStats.byUser[0]?.count || 0,
           byVendor: bookingStats.byVendor[0]?.count || 0,
+          byStatus: bookingStats.byStatus || [],
           timeline: bookingStats.timeline || [],
           ratingDistribution: bookingStats.ratingDistribution || [],
         },
+
+        // ===== REVENUE ANALYTICS =====
         revenue: {
-          totalRevenue: transactions[0]?.totalRevenue || 0,
-          totalDiscounts: transactions[0]?.totalDiscounts || 0,
-          transactionCount: transactions[0]?.count || 0,
-          avgOrderValue: transactions[0]?.avgOrderValue || 0,
+          totalRevenue: transactionData.totalRevenue || 0,
+          totalDiscounts: transactionData.totalDiscounts || 0,
+          transactionCount: transactionData.count || 0,
+          avgOrderValue: transactionData.avgOrderValue || 0,
+          minOrderValue: transactionData.minOrderValue || 0,
+          maxOrderValue: transactionData.maxOrderValue || 0,
+          timeline: transactionTimeline || [],
         },
+
+        // ===== REFERRAL ANALYTICS =====
         referrals: {
           pending: shareMap.pending || 0,
           accepted: shareMap.accepted || 0,
@@ -2954,7 +3863,10 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
             (shareMap.accepted || 0) +
             (shareMap.rejected || 0) +
             (shareMap.completed || 0),
+          timeline: shareTimeline || [],
         },
+
+        // ===== LEAVE ANALYTICS =====
         leaves: {
           data: leaves,
           stats: {
@@ -2962,11 +3874,22 @@ exports.getVendorDetailAnalytics = async (req, res, next) => {
             active: leaveStatsData.active || 0,
             cancelled: leaveStatsData.cancelled || 0,
             currentActive: leaveStatsData.currentActive || 0,
+            totalDays: Math.round(leaveStatsData.totalDays || 0),
           },
           upcoming: upcomingLeaves,
+          currentActive: currentActiveLeaves,
         },
-        topUsers: topUsers,
+
+        // ===== PATTERNS =====
         patterns,
+
+        // ===== TOP USERS =====
+        topUsers: topUsers || [],
+
+        // ===== RATING ANALYSIS =====
+        ratingAnalysis: ratingAnalysis || [],
+
+        // ===== DATE RANGE =====
         from: from || null,
         to: to || null,
       },

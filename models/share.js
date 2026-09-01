@@ -4,7 +4,7 @@ const { Schema } = mongoose;
 const shareSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: "User", index: true }, // who shared
   vendorId: { type: Schema.Types.ObjectId, ref: "Vendor", index: true }, // which vendor was shared
-
+  name: { type: String },
   phoneNo: { type: Number, index: true }, // for quick lookups by phone number
   status: {
     type: String,

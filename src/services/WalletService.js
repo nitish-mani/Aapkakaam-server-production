@@ -29,6 +29,20 @@ class WalletService {
    * @param {string} metadata.currency - Currency
    * @returns {Promise<Object>} Result with entity and ledger
    */
+
+  /**
+   * PHASE 6: Credit wallet with ledger entry
+   *
+   * Supports:
+   * 1. Existing MongoDB session
+   * 2. Standalone wallet credit without session
+   *
+   * IMPORTANT:
+   * If a session is passed from PaymentService, this method
+   * DOES NOT start/commit/abort its own transaction.
+   *
+   * The caller owns the transaction.
+   */
   async credit(
     entityType,
     entityId,
@@ -37,92 +51,109 @@ class WalletService {
     totalDiscount,
     originalAmount,
     metadata = {},
+    existingSession = null,
   ) {
-    // Validate required parameters
+    // ==========================================================
+    // VALIDATION
+    // ==========================================================
+
     if (!entityType || !["user", "vendor"].includes(entityType)) {
       const error = new Error('entityType must be "user" or "vendor"');
+
       error.code = "INVALID_ENTITY_TYPE";
-      throw error;
-    }
-    if (!entityId) {
-      const error = new Error("entityId is required");
-      error.code = "ENTITY_ID_REQUIRED";
+
       throw error;
     }
 
-    if (!amount || amount <= 0) {
+    if (!entityId) {
+      const error = new Error("entityId is required");
+
+      error.code = "ENTITY_ID_REQUIRED";
+
+      throw error;
+    }
+
+    if (!amount || Number(amount) <= 0) {
       const error = new Error("amount must be greater than 0");
+
       error.code = "INVALID_AMOUNT";
+
       throw error;
     }
 
     if (!transactionId) {
       const error = new Error("transactionId is required");
+
       error.code = "TRANSACTION_ID_REQUIRED";
+
       throw error;
     }
 
-    // Extract metadata with defaults
+    // ==========================================================
+    // METADATA
+    // ==========================================================
+
     const {
       idempotencyKey,
       financialOperationId,
+
       entryType = "PAYMENT",
+
       source = "payment_verification",
+
       paymentId,
+
       orderId,
+
       refundId,
+
       requestId = crypto.randomUUID(),
+
       ipAddress,
+
       createdBy = "system",
+
       referenceType = "transaction",
+
       referenceId = transactionId,
+
       gateway = "razorpay",
+
       currency = "INR",
+
       discount = 0,
+
       finalAmount = amount,
+
       metadata: additionalMetadata = {},
     } = metadata;
 
-    // CRITICAL: Validate idempotencyKey
+    // ==========================================================
+    // IDEMPOTENCY VALIDATION
+    // ==========================================================
+
     if (!idempotencyKey || idempotencyKey.trim() === "") {
-      WalletLogger.error(
-        {
-          entityType,
-          entityId,
-          amount,
-          transactionId,
-          metadataKeys: Object.keys(metadata),
-          hasIdempotencyKey: !!idempotencyKey,
-        },
-        "idempotencyKey is required for wallet credit",
-      );
-
       const error = new Error("idempotencyKey is required and cannot be empty");
+
       error.code = "IDEMPOTENCY_KEY_REQUIRED";
+
       throw error;
     }
 
-    // CRITICAL: Validate financialOperationId
+    // ==========================================================
+    // FINANCIAL OPERATION VALIDATION
+    // ==========================================================
+
     if (!financialOperationId || financialOperationId.trim() === "") {
-      WalletLogger.error(
-        {
-          entityType,
-          entityId,
-          amount,
-          transactionId,
-          metadataKeys: Object.keys(metadata),
-          hasFinancialOperationId: !!financialOperationId,
-        },
-        "financialOperationId is required for wallet credit",
-      );
-
       const error = new Error("financialOperationId is required and cannot be empty");
+
       error.code = "FINANCIAL_OPERATION_ID_REQUIRED";
+
       throw error;
     }
 
-    // Normalize IDs
     const normalizedIdempotencyKey = idempotencyKey.trim();
+
     const normalizedFinancialOperationId = financialOperationId.trim();
 
     WalletLogger.debug(
@@ -131,192 +162,455 @@ class WalletService {
         entityId,
         amount,
         transactionId,
+
         idempotencyKey: normalizedIdempotencyKey,
+
         financialOperationId: normalizedFinancialOperationId,
+
         entryType,
         source,
+
+        hasExternalSession: !!existingSession,
       },
+
       "Starting wallet credit with ledger entry",
     );
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    // ==========================================================
+    // SESSION MANAGEMENT
+    //
+    // If caller supplied session:
+    //     use caller session
+    //
+    // Otherwise:
+    //     create our own transaction
+    // ==========================================================
+
+    let session = existingSession;
+
+    let ownsSession = false;
+
+    if (!session) {
+      session = await mongoose.startSession();
+
+      session.startTransaction();
+
+      ownsSession = true;
+    }
 
     try {
       let entity;
       let previousBalance;
       let updated;
 
-      // Get entity and current balance
+      // ========================================================
+      // GET ENTITY
+      // ========================================================
+
       if (entityType === "user") {
         entity = await User.findById(entityId).session(session);
+
         if (!entity) {
-          throw new Error("User not found");
+          const error = new Error("User not found");
+
+          error.code = "USER_NOT_FOUND";
+
+          throw error;
         }
-        previousBalance = entity.balance || 0;
+
+        previousBalance = Number(entity.balance || 0);
+
+        // ======================================================
+        // UPDATE USER BALANCE
+        // ======================================================
 
         updated = await User.findByIdAndUpdate(
           entityId,
+
           {
             $inc: {
               balance: amount,
-              totalDiscount: totalDiscount,
+
+              totalDiscount: totalDiscount || 0,
+
               transactionCount: 1,
-              totalOriginalAmount: originalAmount,
+
+              totalOriginalAmount: originalAmount || 0,
             },
           },
-          { new: true, session },
+
+          {
+            new: true,
+
+            session,
+          },
         );
-      } else if (entityType === "vendor") {
+      }
+
+      // ========================================================
+      // VENDOR
+      // ========================================================
+      else if (entityType === "vendor") {
         entity = await Vendor.findById(entityId).session(session);
+
         if (!entity) {
-          throw new Error("Vendor not found");
+          WalletLogger.error(
+            {
+              entityType,
+              entityId: entityId?.toString?.() || entityId,
+
+              transactionId,
+
+              hasSession: !!session,
+
+              ownsSession,
+            },
+
+            "Vendor not found during wallet credit",
+          );
+
+          const error = new Error("Vendor not found");
+
+          error.code = "VENDOR_NOT_FOUND";
+
+          throw error;
         }
-        previousBalance = entity.balance || 0;
+
+        previousBalance = Number(entity.balance || 0);
+
+        // ======================================================
+        // UPDATE VENDOR BALANCE
+        // ======================================================
 
         updated = await Vendor.findByIdAndUpdate(
           entityId,
+
           {
             $inc: {
               balance: amount,
-              totalDiscount: totalDiscount,
+
+              totalDiscount: totalDiscount || 0,
+
               transactionCount: 1,
-              totalOriginalAmount: originalAmount,
+
+              totalOriginalAmount: originalAmount || 0,
             },
           },
-          { new: true, session },
+
+          {
+            new: true,
+
+            session,
+          },
         );
-      } else {
-        throw new Error("Invalid entity type");
       }
 
-      // Create ledger entry with ALL required fields
+      // ========================================================
+      // INVALID ENTITY
+      // ========================================================
+      else {
+        const error = new Error("Invalid entity type");
+
+        error.code = "INVALID_ENTITY_TYPE";
+
+        throw error;
+      }
+
+      // ========================================================
+      // VERIFY UPDATE
+      // ========================================================
+
+      if (!updated) {
+        const error = new Error(`${entityType} could not be updated`);
+
+        error.code = "ENTITY_UPDATE_FAILED";
+
+        throw error;
+      }
+
+      // ========================================================
+      // CREATE WALLET LEDGER
+      // ========================================================
+
       const ledgerData = {
+        // ------------------------------------------------------
         // Entity reference
+        // ------------------------------------------------------
+
         userId: entityType === "user" ? entityId : undefined,
+
         vendorId: entityType === "vendor" ? entityId : undefined,
 
+        // ------------------------------------------------------
         // Transaction references
-        transactionId: transactionId,
+        // ------------------------------------------------------
+
+        transactionId,
+
         paymentId: paymentId || undefined,
+
         orderId: orderId || undefined,
+
         refundId: refundId || undefined,
 
-        // Ledger entries
+        // ------------------------------------------------------
+        // Ledger amounts
+        // ------------------------------------------------------
+
         credit: amount,
+
         debit: 0,
+
         balanceBefore: previousBalance,
+
         balanceAfter: updated.balance,
 
-        // Entry type - REQUIRED
-        entryType: entryType,
+        // ------------------------------------------------------
+        // Entry type
+        // ------------------------------------------------------
 
-        // Reference - REQUIRED
-        referenceType: referenceType,
-        referenceId: referenceId,
+        entryType,
 
+        // ------------------------------------------------------
+        // Reference
+        // ------------------------------------------------------
+
+        referenceType,
+
+        referenceId,
+
+        // ------------------------------------------------------
         // Running balance
+        // ------------------------------------------------------
+
         runningBalance: updated.balance,
 
-        // Idempotency - REQUIRED
+        // ------------------------------------------------------
+        // Idempotency
+        // ------------------------------------------------------
+
         idempotencyKey: normalizedIdempotencyKey,
 
-        // Financial operation ID - REQUIRED
+        // ------------------------------------------------------
+        // Financial operation
+        // ------------------------------------------------------
+
         financialOperationId: normalizedFinancialOperationId,
 
-        // Source and tracking
-        source: source,
-        requestId: requestId,
+        // ------------------------------------------------------
+        // Source
+        // ------------------------------------------------------
+
+        source,
+
+        requestId,
+
         ipAddress: ipAddress || undefined,
 
-        // Who performed the operation
-        createdBy: createdBy,
+        // ------------------------------------------------------
+        // Created by
+        // ------------------------------------------------------
 
+        createdBy,
+
+        // ------------------------------------------------------
         // Metadata
+        // ------------------------------------------------------
+
         metadata: {
-          discount: discount,
-          finalAmount: finalAmount,
-          gateway: gateway,
-          currency: currency,
+          discount,
+
+          finalAmount,
+
+          gateway,
+
+          currency,
+
           ...additionalMetadata,
         },
       };
 
-      // Log the ledger data for debugging (without sensitive info)
+      // ========================================================
+      // LOG
+      // ========================================================
+
       WalletLogger.debug(
         {
           entityType,
+
           entityId,
+
           transactionId,
+
           amount,
+
           idempotencyKey: normalizedIdempotencyKey,
+
           financialOperationId: normalizedFinancialOperationId,
+
           entryType,
+
           balanceBefore: previousBalance,
+
           balanceAfter: updated.balance,
+
+          hasExternalSession: !!existingSession,
         },
+
         "Creating WalletLedger entry",
       );
 
-      const ledgerEntry = new WalletLedger(ledgerData);
-      await ledgerEntry.save({ session });
+      // ========================================================
+      // SAVE LEDGER
+      // ========================================================
 
-      await session.commitTransaction();
+      const ledgerEntry = new WalletLedger(ledgerData);
+
+      await ledgerEntry.save({
+        session,
+      });
+
+      // ========================================================
+      // COMMIT ONLY IF WE OWN SESSION
+      // ========================================================
+
+      if (ownsSession) {
+        await session.commitTransaction();
+      }
+
+      // ========================================================
+      // SUCCESS LOG
+      // ========================================================
 
       WalletLogger.info(
         {
           entityType,
+
           entityId,
+
           transactionId,
+
           amount,
+
+          balanceBefore: previousBalance,
+
           balanceAfter: updated.balance,
+
           ledgerId: ledgerEntry._id,
+
           idempotencyKey: normalizedIdempotencyKey,
+
           financialOperationId: normalizedFinancialOperationId,
+
+          usedExternalSession: !!existingSession,
         },
+
         "Wallet credited successfully with ledger entry",
       );
-      console.log("wallet", updated);
-      return { entity: updated, ledger: ledgerEntry };
-    } catch (error) {
-      await session.abortTransaction();
 
-      // Enhanced error logging
+      return {
+        entity: updated,
+
+        ledger: ledgerEntry,
+
+        previousBalance,
+
+        amount,
+
+        balanceAfter: updated.balance,
+
+        financialOperationId: normalizedFinancialOperationId,
+      };
+    } catch (error) {
+      // ========================================================
+      // ABORT ONLY IF WE OWN SESSION
+      // ========================================================
+
+      if (ownsSession) {
+        try {
+          await session.abortTransaction();
+        } catch (abortError) {
+          WalletLogger.error(
+            {
+              error: abortError.message,
+
+              originalError: error.message,
+            },
+
+            "Failed to abort wallet transaction",
+          );
+        }
+      }
+
+      // ========================================================
+      // ERROR LOG
+      // ========================================================
+
       WalletLogger.error(
         {
           error: error.message,
+
           errorCode: error.code,
+
           errorName: error.name,
+
           entityType,
+
           entityId,
+
           amount,
+
           transactionId,
+
           idempotencyKey: normalizedIdempotencyKey,
+
           financialOperationId: normalizedFinancialOperationId,
+
+          ownsSession,
+
+          usedExternalSession: !!existingSession,
+
           stack: error.stack,
         },
+
         "Wallet credit failed",
       );
 
-      // Handle validation errors with better context
+      // ========================================================
+      // MONGOOSE VALIDATION ERROR
+      // ========================================================
+
       if (error.name === "ValidationError") {
         const validationErrors = Object.keys(error.errors).map((key) => ({
           field: key,
+
           message: error.errors[key].message,
+
           value: error.errors[key].value,
         }));
 
         const enhancedError = new Error(
-          `WalletLedger validation failed: ${validationErrors.map((e) => `${e.field}: ${e.message}`).join(", ")}`,
+          `WalletLedger validation failed: ${validationErrors
+            .map((e) => `${e.field}: ${e.message}`)
+            .join(", ")}`,
         );
+
         enhancedError.code = "VALIDATION_ERROR";
+
         enhancedError.details = validationErrors;
+
         throw enhancedError;
       }
 
       throw error;
     } finally {
-      await session.endSession();
+      // ========================================================
+      // END ONLY OUR OWN SESSION
+      // ========================================================
+
+      if (ownsSession) {
+        await session.endSession();
+      }
     }
   }
 

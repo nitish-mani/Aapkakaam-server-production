@@ -982,7 +982,6 @@ class VendorService {
       bookingCount: bookings.length,
       duration_ms: Date.now() - startTime,
     });
-    console.log(bookings);
     return bookings;
   }
 
@@ -1117,530 +1116,392 @@ class VendorService {
   /**
    * Get available vendors with smart pagination
    */
-  static async getAvailableVendors(
-  type,
-  pincode,
-  bookingDate1,
-  page,
-  minRating,
-  minWageRate,
-  userIdentifier,
-) {
-  const startTime = Date.now();
 
-  // ============================================================
-  // Normalize / validate date
-  // ============================================================
+  static async getAvailableVendors(type, pincode, bookingDate1, page, minRating, minWageRate) {
+    const startTime = Date.now();
 
-  const bookingDate = normalizeDateIST(bookingDate1);
+    // ============================================================
+    // NORMALIZE INPUT
+    // ============================================================
 
-  if (!type || !pincode || !bookingDate) {
-    VendorLogger.warn({
-      event: "AVAILABLE_VENDORS_FAILED",
-      reason: "missing_required_params",
-      type,
-      pincode,
-      bookingDate: bookingDate1,
-      duration_ms: Date.now() - startTime,
-    });
+    const normalizedType = String(type || "").trim();
+    const normalizedPincode = String(pincode || "").trim();
 
-    throw ApiError.badRequest(
-      "Type, pincode, and booking date are required",
+    const currentPage = Math.max(Number.parseInt(page, 10) || 1, 1);
+
+    const normalizedMinRating = Number.isFinite(Number(minRating)) ? Number(minRating) : 0;
+
+    const normalizedMinWageRate = Number.isFinite(Number(minWageRate)) ? Number(minWageRate) : 0;
+
+    // ============================================================
+    // NORMALIZE DATE
+    // ============================================================
+
+    const bookingDate = normalizeDateIST(bookingDate1);
+
+    if (!normalizedType || !normalizedPincode || !bookingDate) {
+      throw ApiError.badRequest("Type, pincode, and booking date are required");
+    }
+
+    const cacheDate = bookingDate.toISOString().slice(0, 10);
+
+    // ============================================================
+    // PAGINATION
+    // ============================================================
+
+    const limit = 12;
+
+    const skip = (currentPage - 1) * limit;
+
+    // ============================================================
+    // COMMISSION
+    // ============================================================
+
+    const commission = this.getCommission(normalizedType);
+
+    // ============================================================
+    // FINAL RESULT CACHE
+    //
+    // This prevents MongoDB from being hit repeatedly for
+    // identical searches.
+    //
+    // Short TTL keeps availability reasonably fresh.
+    // ============================================================
+
+    const resultCacheKey = [
+      "vendor-search",
+      normalizedType,
+      normalizedPincode,
+      cacheDate,
+      currentPage,
+      normalizedMinRating,
+      normalizedMinWageRate,
+    ].join(":");
+
+    // ============================================================
+    // COMPLETE SEARCH CACHE
+    // ============================================================
+
+    const result = await CacheService.remember(
+      resultCacheKey,
+      15,
+
+      async () => {
+        // ======================================================
+        // UNAVAILABLE VENDORS
+        // ======================================================
+
+        const unavailableCacheKey = redisKeys.UNAVAILABLE_VENDOR_IDS(
+          normalizedType,
+          normalizedPincode,
+          cacheDate,
+        );
+
+        const unavailableVendorIds = await CacheService.remember(
+          unavailableCacheKey,
+          30,
+
+          async () => {
+            const [bookedVendorIds, leaveVendorIds] = await Promise.all([
+              // ------------------------------------------------
+              // ACTIVE BOOKINGS
+              // ------------------------------------------------
+
+              Bookings.distinct("vendorId", {
+                // type: normalizedType,
+
+                pincode: normalizedPincode,
+
+                bookingDate,
+
+                cancelOrder: {
+                  $ne: true,
+                },
+
+                orderCompleted: {
+                  $ne: true,
+                },
+              }),
+
+              // ------------------------------------------------
+              // LEAVE
+              // ------------------------------------------------
+
+              VendorLeaveService.getUnavailableVendorIds(bookingDate),
+            ]);
+
+            return [
+              ...new Set([
+                ...bookedVendorIds.map((id) => id.toString()),
+
+                ...leaveVendorIds.map((id) => id.toString()),
+              ]),
+            ];
+          },
+
+          {
+            tags: ["vendors", "availability"],
+          },
+        );
+
+        // ======================================================
+        // CONVERT IDS
+        // ======================================================
+
+        const excludedObjectIds = unavailableVendorIds
+          .filter((id) => mongoose.Types.ObjectId.isValid(id))
+          .map((id) => new mongoose.Types.ObjectId(id));
+
+        // ======================================================
+        // BASE VENDOR FILTER
+        // ======================================================
+        //
+        // IMPORTANT:
+        //
+        // wageRate is now an array.
+        //
+        // Therefore we CANNOT do:
+        //
+        // wageRate: { $gte: minWageRate }
+        //
+        // because that does not guarantee that the wage belongs
+        // to the requested job.
+        //
+        // We filter the requested job using type first and then
+        // match its corresponding wageRate in Node.
+        //
+        // ======================================================
+
+        const baseMatchStage = {
+          type: normalizedType,
+
+          pincode: normalizedPincode,
+
+          status: "active",
+
+          balance: {
+            $gte: commission,
+          },
+
+          rating: {
+            $gte: normalizedMinRating,
+          },
+        };
+
+        // --------------------------------------------------------
+        // Exclude unavailable vendors
+        // --------------------------------------------------------
+
+        if (excludedObjectIds.length > 0) {
+          baseMatchStage._id = {
+            $nin: excludedObjectIds,
+          };
+        }
+
+        // ======================================================
+        // FETCH CANDIDATES
+        // ======================================================
+        //
+        // Keep this deliberately small.
+        //
+        // We don't need 100+ documents for a 12-item response.
+        //
+        // ======================================================
+
+        const candidates = await Vendor.find(baseMatchStage)
+          .select({
+            _id: 1,
+            name: 1,
+            type: 1,
+            gender: 1,
+            phoneNo: 1,
+            rating: 1,
+            ratingCount: 1,
+            wageRate: 1,
+            wageRateType: 1,
+            imgURL: 1,
+            completedVendor: 1,
+            experience: 1,
+            isVerified: 1,
+            status: 1,
+          })
+          .sort({
+            isVerified: -1,
+            rating: -1,
+            completedVendor: -1,
+            _id: 1,
+          })
+          .limit(60)
+          .lean();
+
+        // ======================================================
+        // MATCH CORRECT JOB + WAGE
+        // ======================================================
+
+        const matchingCandidates = candidates.filter((vendor) => {
+          const jobs = Array.isArray(vendor.type) ? vendor.type : [];
+
+          const rates = Array.isArray(vendor.wageRate) ? vendor.wageRate : [];
+
+          const rateTypes = Array.isArray(vendor.wageRateType) ? vendor.wageRateType : [];
+
+          // ------------------------------------------------
+          // Find requested job index
+          // ------------------------------------------------
+
+          const jobIndex = jobs.indexOf(normalizedType);
+
+          if (jobIndex === -1) {
+            return false;
+          }
+
+          // ------------------------------------------------
+          // Get rate for THIS job
+          // ------------------------------------------------
+
+          const rate = Number(rates[jobIndex] ?? 0);
+
+          // ------------------------------------------------
+          // Wage filter
+          // ------------------------------------------------
+
+          if (rate < normalizedMinWageRate) {
+            return false;
+          }
+
+          // ------------------------------------------------
+          // Keep arrays temporarily for formatting
+          // ------------------------------------------------
+
+          vendor._matchedJobIndex = jobIndex;
+
+          vendor._matchedRate = rate;
+
+          vendor._matchedRateType = rateTypes[jobIndex] ?? "";
+
+          return true;
+        });
+
+        // ======================================================
+        // PAGINATION
+        // ======================================================
+
+        const vendors = matchingCandidates.slice(skip, skip + limit);
+
+        // ======================================================
+        // FORMAT RESPONSE
+        // ======================================================
+
+        const formattedVendors = vendors.map((vendor) => {
+          const jobIndex = vendor._matchedJobIndex;
+
+          return {
+            _id: vendor._id,
+
+            name: vendor.name,
+
+            // Return ONLY requested job.
+            type: normalizedType,
+
+            gender: vendor.gender || "",
+
+            phoneNo: vendor.phoneNo
+              ? vendor.phoneNo.toString().replace(/(\d{2})\d{6}(\d{2})/, "$1******$2")
+              : "",
+
+            rating: vendor.rating || 0,
+
+            ratingCount: vendor.ratingCount || 0,
+
+            // ------------------------------------------------
+            // Selected job's wage
+            // ------------------------------------------------
+
+            wageRate: vendor._matchedRate ?? 0,
+
+            wageRateType: vendor._matchedRateType || "",
+
+            imgURL: vendor.imgURL || null,
+
+            completedVendor: vendor.completedVendor || 0,
+
+            experience: vendor.experience || 0,
+
+            isVerified: !!vendor.isVerified,
+
+            status: vendor.status || "active",
+          };
+        });
+
+        // ======================================================
+        // REMOVE INTERNAL FIELDS
+        // ======================================================
+
+        for (const vendor of matchingCandidates) {
+          delete vendor._matchedJobIndex;
+          delete vendor._matchedRate;
+          delete vendor._matchedRateType;
+        }
+
+        // ======================================================
+        // TOTAL
+        // ======================================================
+        //
+        // We intentionally DON'T run countDocuments().
+        //
+        // For a high-RPS search API, an additional count query
+        // for every cache miss is unnecessary load.
+        //
+        // We use the candidate pool as the search window.
+        //
+        // ======================================================
+
+        const total = matchingCandidates.length;
+
+        return {
+          total,
+
+          vendors: formattedVendors,
+
+          freshData: formattedVendors.length > 0,
+
+          currentPage,
+
+          totalPages: Math.ceil(total / limit),
+
+          hasNextPage: skip + formattedVendors.length < total,
+        };
+      },
+
+      {
+        tags: ["vendors", "search", normalizedType, normalizedPincode],
+      },
     );
-  }
 
-  const cacheDate = bookingDate.toISOString().slice(0, 10);
+    // ============================================================
+    // DEVELOPMENT LOGGING ONLY
+    // ============================================================
 
-  // ============================================================
-  // Pagination
-  // ============================================================
+    if (process.env.NODE_ENV !== "production") {
+      VendorLogger.info({
+        event: "AVAILABLE_VENDORS_RETRIEVED",
 
-  const limit = 12;
-  const currentPage = Math.max(parseInt(page, 10) || 1, 1);
-  const skip = (currentPage - 1) * limit;
+        type: normalizedType,
 
-  // ============================================================
-  // Commission
-  // ============================================================
+        pincode: normalizedPincode,
 
-  const commission = this.getCommission(type);
-
-  // ============================================================
-  // Request context
-  // ============================================================
-
-  const requestContext = `${type}-${pincode}-${bookingDate}`;
-
-  // ============================================================
-  // Projection
-  // ============================================================
-
-  const PROJECTION_STRING =
-    "_id name type gender phoneNo rating ratingCount " +
-    "wageRate wageRateType imgURL completedVendor experience " +
-    "isVerified status";
-
-  const PROJECTION = {
-    _id: 1,
-    name: 1,
-    type: 1,
-    gender: 1,
-    phoneNo: 1,
-    rating: 1,
-    ratingCount: 1,
-    wageRate: 1,
-    wageRateType: 1,
-    imgURL: 1,
-    completedVendor: 1,
-    experience: 1,
-    isVerified: 1,
-    status: 1,
-  };
-
-  // ============================================================
-  // Find unavailable vendors
-  //
-  // Redis caches:
-  //   - already booked vendors
-  //   - vendors on leave
-  //
-  // This avoids repeatedly hitting MongoDB for availability data.
-  // ============================================================
-
-  const availabilityStart = Date.now();
-
-  const unavailableVendorIds = await CacheService.remember(
-    redisKeys.UNAVAILABLE_VENDOR_IDS(
-      type,
-      pincode,
-      cacheDate,
-    ),
-    30,
-    async () => {
-      const [bookedVendorIds, leaveVendorIds] =
-        await Promise.all([
-          Bookings.distinct("vendorId", {
-            type,
-            pincode,
-            bookingDate,
-            cancelOrder: { $ne: true },
-          }),
-
-          VendorLeaveService.getUnavailableVendorIds(
-            bookingDate,
-          ),
-        ]);
-
-      return [
-        ...new Set([
-          ...bookedVendorIds.map((id) => id.toString()),
-          ...leaveVendorIds.map((id) => id.toString()),
-        ]),
-      ];
-    },
-    {
-      tags: ["vendors", "availability"],
-    },
-  );
-
-  const availabilityMs = Date.now() - availabilityStart;
-
-  // ============================================================
-  // Convert unavailable IDs to ObjectIds
-  // ============================================================
-
-  const excludedObjectIds = unavailableVendorIds
-    .filter((id) => mongoose.Types.ObjectId.isValid(id))
-    .map((id) => new mongoose.Types.ObjectId(id));
-
-  // ============================================================
-  // Base vendor filter
-  //
-  // IMPORTANT:
-  // Only active vendors are available.
-  // ============================================================
-
-  const baseMatchStage = {
-    type,
-    pincode,
-
-    status: "active",
-
-    balance: {
-      $gte: commission,
-    },
-
-    wageRate: {
-      $exists: true,
-      $gte: minWageRate,
-    },
-
-    rating: {
-      $gte: minRating,
-    },
-  };
-
-  // ============================================================
-  // Exclude unavailable vendors
-  // ============================================================
-
-  if (excludedObjectIds.length > 0) {
-    baseMatchStage._id = {
-      $nin: excludedObjectIds,
-    };
-  }
-
-  // ============================================================
-  // Total count
-  //
-  // Cached for 30 seconds.
-  // ============================================================
-
-  const countStart = Date.now();
-
-  const totalCountPromise = CacheService.remember(
-    redisKeys.VENDOR_COUNT_CACHE(
-      type,
-      pincode,
-      cacheDate,
-      minRating,
-      minWageRate,
-    ),
-    30,
-    () => Vendor.countDocuments(baseMatchStage),
-    {
-      tags: ["vendors", "availability"],
-    },
-  );
-
-  // ============================================================
-  // Find fresh vendors
-  //
-  // IMPORTANT:
-  //
-  // We do NOT open a MongoDB transaction here.
-  //
-  // This endpoint is a read/search operation and should not hold
-  // a MongoDB transaction while serving normal vendor discovery.
-  // ============================================================
-
-  const findStart = Date.now();
-
-  let freshCandidates = [];
-
-  try {
-    freshCandidates = await Vendor.find({
-      ...baseMatchStage,
-
-      $or: [
-        {
-          [`userShownContext.${userIdentifier}`]: {
-            $ne: requestContext,
-          },
-        },
-
-        {
-          [`userShownContext.${userIdentifier}`]: {
-            $exists: false,
-          },
-        },
-      ],
-    })
-      .limit(limit * 3)
-      .select(PROJECTION_STRING)
-      .lean();
-  } catch (error) {
-    VendorLogger.error({
-      event: "AVAILABLE_VENDORS_FIND_ERROR",
-      type,
-      pincode,
-      bookingDate: cacheDate,
-      userIdentifier,
-      err: error,
-      duration_ms: Date.now() - startTime,
-    });
-
-    throw error;
-  }
-
-  const findMs = Date.now() - findStart;
-
-  // ============================================================
-  // Atomically claim vendors as "shown"
-  //
-  // Instead of:
-  //
-  //   READ → transaction → bulkWrite
-  //
-  // we use:
-  //
-  //   findOneAndUpdate()
-  //
-  // for each candidate.
-  //
-  // This prevents two concurrent requests from successfully
-  // claiming the same vendor for the same user/context.
-  // ============================================================
-
-  const claimStart = Date.now();
-
-  const vendors = [];
-  const claimedVendorIds = new Set();
-
-  for (const candidate of freshCandidates) {
-    if (vendors.length >= limit) {
-      break;
-    }
-
-    // Avoid duplicate candidates within this request.
-    const candidateId = candidate._id.toString();
-
-    if (claimedVendorIds.has(candidateId)) {
-      continue;
-    }
-
-    try {
-      const claimedVendor = await Vendor.findOneAndUpdate(
-        {
-          _id: candidate._id,
-
-          ...baseMatchStage,
-
-          $or: [
-            {
-              [`userShownContext.${userIdentifier}`]: {
-                $ne: requestContext,
-              },
-            },
-
-            {
-              [`userShownContext.${userIdentifier}`]: {
-                $exists: false,
-              },
-            },
-          ],
-        },
-        {
-          $set: {
-            [`userShownContext.${userIdentifier}`]:
-              requestContext,
-
-            lastShownContext: requestContext,
-          },
-        },
-        {
-          new: true,
-          projection: PROJECTION,
-        },
-      ).lean();
-
-      if (claimedVendor) {
-        claimedVendorIds.add(candidateId);
-        vendors.push(claimedVendor);
-      }
-    } catch (error) {
-      VendorLogger.error({
-        event: "AVAILABLE_VENDOR_CLAIM_ERROR",
-        vendorId: candidateId,
-        type,
-        pincode,
         bookingDate: cacheDate,
-        userIdentifier,
-        err: error,
+
+        returnedCount: result.vendors.length,
+
+        currentPage,
+
+        duration_ms: Date.now() - startTime,
       });
-
-      // Continue trying other vendors.
-    }
-  }
-
-  const claimMs = Date.now() - claimStart;
-
-  let isFreshData = vendors.length > 0;
-
-  // ============================================================
-  // Get total count
-  // ============================================================
-
-  const totalCount = await totalCountPromise;
-
-  const countMs = Date.now() - countStart;
-
-  // ============================================================
-  // Fallback 1
-  //
-  // Previously shown vendors for this user.
-  // ============================================================
-
-  if (vendors.length === 0) {
-    const fallbackStart = Date.now();
-
-    const previouslyShownVendors = await Vendor.find({
-      ...baseMatchStage,
-
-      [`userShownContext.${userIdentifier}`]:
-        requestContext,
-    })
-      .select(PROJECTION_STRING)
-      .limit(limit)
-      .lean();
-
-    vendors.push(...previouslyShownVendors);
-
-    VendorLogger.debug?.({
-      event: "AVAILABLE_VENDORS_FALLBACK_PREVIOUS",
-      count: previouslyShownVendors.length,
-      duration_ms: Date.now() - fallbackStart,
-    });
-  }
-
-  // ============================================================
-  // Fallback 2
-  //
-  // Random vendors.
-  //
-  // This should be reached only when no normal vendors are found.
-  // ============================================================
-
-  if (vendors.length === 0 && totalCount > 0) {
-    const fallbackStart = Date.now();
-
-    const randomVendors = await Vendor.aggregate([
-      {
-        $match: baseMatchStage,
-      },
-
-      {
-        $sample: {
-          size: Math.min(1000, totalCount),
-        },
-      },
-
-      {
-        $skip: skip,
-      },
-
-      {
-        $limit: limit,
-      },
-
-      {
-        $project: PROJECTION,
-      },
-    ]);
-
-    vendors.push(...randomVendors);
-
-    VendorLogger.debug?.({
-      event: "AVAILABLE_VENDORS_FALLBACK_RANDOM",
-      count: randomVendors.length,
-      duration_ms: Date.now() - fallbackStart,
-    });
-  }
-
-  // ============================================================
-  // Sort vendors
-  //
-  // 1. Verified vendors
-  // 2. Rating
-  // 3. Completed bookings
-  // ============================================================
-
-  vendors.sort((a, b) => {
-    if (
-      (b.isVerified ? 1 : 0) !==
-      (a.isVerified ? 1 : 0)
-    ) {
-      return (
-        (b.isVerified ? 1 : 0) -
-        (a.isVerified ? 1 : 0)
-      );
     }
 
-    if ((b.rating || 0) !== (a.rating || 0)) {
-      return (b.rating || 0) - (a.rating || 0);
-    }
-
-    return (
-      (b.completedVendor || 0) -
-      (a.completedVendor || 0)
-    );
-  });
-
-  // ============================================================
-  // Format response
-  // ============================================================
-
-  const formattedVendors = vendors.map((vendor) => ({
-    ...vendor,
-
-    phoneNo: vendor.phoneNo
-      ? vendor.phoneNo
-          .toString()
-          .replace(
-            /(\d{2})\d{6}(\d{2})/,
-            "$1******$2",
-          )
-      : "",
-  }));
-
-  // ============================================================
-  // Final logging
-  // ============================================================
-
-  const durationMs = Date.now() - startTime;
-
-  VendorLogger.info({
-    event: "AVAILABLE_VENDORS_RETRIEVED",
-
-    type,
-    pincode,
-    bookingDate: cacheDate,
-
-    total: totalCount,
-
-    returnedCount: formattedVendors.length,
-
-    freshData: isFreshData,
-
-    currentPage: currentPage,
-
-    totalPages: Math.ceil(totalCount / limit),
-
-    hasNextPage:
-      skip + vendors.length < totalCount,
-
-    unavailableCount: excludedObjectIds.length,
-
-    timing: {
-      availability_ms: availabilityMs,
-      vendor_find_ms: findMs,
-      vendor_claim_ms: claimMs,
-      count_ms: countMs,
-      total_ms: durationMs,
-    },
-
-    duration_ms: durationMs,
-  });
-
-  // ============================================================
-  // Response
-  // ============================================================
-
-  return {
-    total: totalCount,
-
-    vendors: formattedVendors,
-
-    freshData: isFreshData,
-
-    currentPage: currentPage,
-
-    totalPages: Math.ceil(totalCount / limit),
-
-    hasNextPage:
-      skip + vendors.length < totalCount,
-  };
-}
+    return result;
+  }
 
   /**
    * ============================================

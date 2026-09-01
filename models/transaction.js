@@ -110,10 +110,16 @@ const transactionSchema = new Schema(
       currency: String,
       gateway: String,
       clientTimestamp: Date,
+
+      signupToken: String,
+      signupPayment: Boolean,
     },
 
     // Category
-    category: { type: String, enum: ["user", "vendor"] },
+    category: {
+      type: String,
+      enum: ["user", "vendor", "vendor_signup"],
+    },
     paymentMethod: { type: String },
 
     // Audit trail

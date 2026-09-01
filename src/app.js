@@ -22,6 +22,12 @@ const pincodeRoutes = require("../routes/pincode");
 const shareRoutes = require("../routes/share");
 const concernRoutes = require("../routes/concern");
 
+const appVersionRoutes = require("../routes/appVersion");
+const adminVersionRoutes = require("../routes/adminVersion");
+
+const websiteMaintenanceRoutes = require("../routes/websiteMaintenanceRoutes");
+const adminWebsiteMaintenanceRoutes = require("../routes/adminWebsiteMaintenanceRoutes");
+
 const app = express();
 
 /* ---------- Proxy trust (needed for correct req.ip behind LB/ingress) ---- */
@@ -109,6 +115,7 @@ app.get("/api/category/:cd/:id", (req, res) => {
 app.use("/api/user", userRoutes);
 app.use("/api/vendor", vendorRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/admin/app-versions", adminVersionRoutes);
 app.use("/api/employee", employeeRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/payment", paymentRoutes);
@@ -116,6 +123,11 @@ app.use("/api/pincode", pincodeRoutes);
 app.use("/api/share", shareRoutes);
 app.use("/api/concerns", concernRoutes);
 
+app.use("/api/app-version", appVersionRoutes);
+
+app.use("/api/website-maintenance", websiteMaintenanceRoutes);
+
+app.use("/api/admin/website-maintenance", adminWebsiteMaintenanceRoutes);
 /* ---------- 404 handler ----------------------------------------------- */
 app.use((req, res) => {
   res.status(404).json({

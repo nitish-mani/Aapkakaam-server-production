@@ -495,7 +495,6 @@ class PaymentService {
 
       // Send notification (outside transaction)
       if (creditedEntity && updatedTransaction) {
-        console.log("notification", creditedEntity);
         await this.sendSuccessNotification(
           creditedEntity,
           updatedTransaction.finalAmount,
@@ -1437,7 +1436,7 @@ class PaymentService {
       source,
       { requestId, ipAddress },
     );
-    console.log("creditEntity", creditedEntity);
+    // console.log("creditEntity", creditedEntity);
     PaymentLogger.info(
       {
         event: "PROCESS_PAYMENT_WALLET_CREDITED",
