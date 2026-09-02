@@ -45,6 +45,7 @@
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.2",
     "razorpay": "^2.9.4",
+    "systeminformation": "^5.33.7",
     "winston": "^3.13.1"
   },
   "devDependencies": {

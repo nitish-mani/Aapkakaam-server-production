@@ -28,6 +28,7 @@ const adminVersionRoutes = require("../routes/adminVersion");
 const websiteMaintenanceRoutes = require("../routes/maintenanceRoutes");
 const adminWebsiteMaintenanceRoutes = require("../routes/adminMaintenanceRoutes");
 
+const systemRoutes = require("../routes/system");
 const app = express();
 
 /* ---------- Proxy trust (needed for correct req.ip behind LB/ingress) ---- */
@@ -116,6 +117,7 @@ app.use("/api/user", userRoutes);
 app.use("/api/vendor", vendorRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/admin/app-versions", adminVersionRoutes);
+app.use("/api/admin/system", systemRoutes);
 app.use("/api/employee", employeeRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/payment", paymentRoutes);
