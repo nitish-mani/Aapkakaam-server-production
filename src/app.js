@@ -25,8 +25,8 @@ const concernRoutes = require("../routes/concern");
 const appVersionRoutes = require("../routes/appVersion");
 const adminVersionRoutes = require("../routes/adminVersion");
 
-const websiteMaintenanceRoutes = require("../routes/websiteMaintenanceRoutes");
-const adminWebsiteMaintenanceRoutes = require("../routes/adminWebsiteMaintenanceRoutes");
+const websiteMaintenanceRoutes = require("../routes/maintenanceRoutes");
+const adminWebsiteMaintenanceRoutes = require("../routes/adminMaintenanceRoutes");
 
 const app = express();
 

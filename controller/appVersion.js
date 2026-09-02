@@ -2,6 +2,9 @@ const AppVersion = require("../models/appVersion");
 const AppVersionEvent = require("../models/appVersionEvent");
 
 const { compareVersions } = require("../src/utils/compareVersions");
+const maintenance = require("../models/maintenance");
+
+const { getMaintenanceStatus } = require("../src/utils/maintenance");
 
 const PLATFORMS = ["android", "ios"];
 
@@ -10,6 +13,46 @@ const EVENT_TYPES = ["version_check", "update_click", "apk_download"];
 /* ============================================================
  * HELPERS
  * ========================================================== */
+
+async function getAppMaintenance(platform) {
+  try {
+    const settings = await WebsiteMaintenance.findOne().lean();
+
+    if (!settings) {
+      return {
+        status: "inactive",
+        active: false,
+        upcoming: false,
+        showBanner: false,
+        showMaintenancePage: false,
+      };
+    }
+
+    const status = getMaintenanceStatus(settings, new Date(), platform);
+
+    return {
+      ...status,
+
+      title: settings.title,
+      subtitle: settings.subtitle,
+      message: settings.message,
+
+      hindiTitle: settings.hindiTitle,
+      hindiSubtitle: settings.hindiSubtitle,
+      hindiMessage: settings.hindiMessage,
+    };
+  } catch (error) {
+    console.error("Unable to check app maintenance:", error);
+
+    return {
+      status: "inactive",
+      active: false,
+      upcoming: false,
+      showBanner: false,
+      showMaintenancePage: false,
+    };
+  }
+}
 
 /**
  * Normalize platform.
@@ -126,9 +169,15 @@ exports.checkVersion = async (req, res, next) => {
     if (!config) {
       return res.status(200).json({
         success: true,
+
         updateAvailable: false,
         forceUpdate: false,
-        maintenanceMode: false,
+
+        // Legacy compatibility
+        maintenanceMode: maintenance.active,
+
+        // New maintenance system
+        maintenance,
 
         latestVersion: currentVersion,
         minimumVersion: currentVersion,

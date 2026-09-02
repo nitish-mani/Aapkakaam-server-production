@@ -1,6 +1,6 @@
 const express = require("express");
 
-const { getPublicMaintenance } = require("../controller/websiteMaintenanceController");
+const { getPublicMaintenance } = require("../controller/maintenance");
 
 const router = express.Router();
 
