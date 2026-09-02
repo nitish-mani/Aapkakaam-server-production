@@ -112,6 +112,7 @@ exports.signup = async (req, res, next) => {
         message: "Mobile number already exists!",
       });
     }
+
     await OtpAuthorizationService.consume({
       otpId: validPhoneNoId,
       accountType: "user",

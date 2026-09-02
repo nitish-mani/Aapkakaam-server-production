@@ -249,82 +249,82 @@ class SmsProvider {
     // Send SMS
     // --------------------------------------------------
 
-    // try {
-    //   const response = await axios.get(url, {
-    //     timeout: 15000,
+    try {
+      const response = await axios.get(url, {
+        timeout: 15000,
 
-    //     validateStatus: (status) => status >= 200 && status < 300,
-    //   });
+        validateStatus: (status) => status >= 200 && status < 300,
+      });
 
-    //   const duration = Date.now() - started;
+      const duration = Date.now() - started;
 
-    //   logger.info(
-    //     {
-    //       event: "SMS_SENT",
+      logger.info(
+        {
+          event: "SMS_SENT",
 
-    //       notificationId: _id,
+          notificationId: _id,
 
-    //       requestId,
+          requestId,
 
-    //       template,
+          template,
 
-    //       phone,
+          phone,
 
-    //       provider: "Fast2SMS",
+          provider: "Fast2SMS",
 
-    //       duration,
+          duration,
 
-    //       providerMessageId: response.data?.request_id || response.data?.requestId || null,
+          providerMessageId: response.data?.request_id || response.data?.requestId || null,
 
-    //       providerStatus: response.data?.return || response.data?.status || null,
-    //     },
-    //     "SMS sent successfully",
-    //   );
+          providerStatus: response.data?.return || response.data?.status || null,
+        },
+        "SMS sent successfully",
+      );
 
-    //   return {
-    //     provider: "Fast2SMS",
+      return {
+        provider: "Fast2SMS",
 
-    //     accepted: true,
+        accepted: true,
 
-    //     success: true,
+        success: true,
 
-    //     status: response.data?.return || response.data?.status || "SUCCESS",
+        status: response.data?.return || response.data?.status || "SUCCESS",
 
-    //     providerMessageId: response.data?.request_id || response.data?.requestId || null,
+        providerMessageId: response.data?.request_id || response.data?.requestId || null,
 
-    //     latency: duration,
-    //   };
-    // } catch (error) {
-    //   const duration = Date.now() - started;
+        latency: duration,
+      };
+    } catch (error) {
+      const duration = Date.now() - started;
 
-    //   logger.error(
-    //     {
-    //       event: "SMS_SEND_FAILED",
+      logger.error(
+        {
+          event: "SMS_SEND_FAILED",
 
-    //       notificationId: _id,
+          notificationId: _id,
 
-    //       requestId,
+          requestId,
 
-    //       template,
+          template,
 
-    //       phone,
+          phone,
 
-    //       provider: "Fast2SMS",
+          provider: "Fast2SMS",
 
-    //       duration,
+          duration,
 
-    //       error: {
-    //         message: error.message,
-    //         code: error.code,
-    //         status: error.response?.status,
-    //         data: error.response?.data,
-    //       },
-    //     },
-    //     "SMS sending failed",
-    //   );
+          error: {
+            message: error.message,
+            code: error.code,
+            status: error.response?.status,
+            data: error.response?.data,
+          },
+        },
+        "SMS sending failed",
+      );
 
-    //   throw error;
-    // }
+      throw error;
+    }
   }
 }
 
