@@ -311,7 +311,7 @@ exports.share_controller_get = async (req, res, next) => {
     // ============================================================
     // RESPONSE
     // ============================================================
-    console.log(formattedShares);
+
     return res.status(200).json({
       message: shares.length > 0 ? "Shares retrieved successfully" : "No shares found",
 

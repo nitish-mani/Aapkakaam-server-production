@@ -318,11 +318,6 @@ const getNetworkInfo = async () => {
         activeNetwork.tx_bytes =
           parseInt(txOut.trim(), 10) || 0;
 
-        console.log(
-          `Network stats loaded from /sys/class/net/${iface}`
-        );
-        console.log(`RX: ${activeNetwork.rx_bytes} bytes`);
-        console.log(`TX: ${activeNetwork.tx_bytes} bytes`);
       } catch (error) {
         console.error(
           "Network statistics fallback failed:",

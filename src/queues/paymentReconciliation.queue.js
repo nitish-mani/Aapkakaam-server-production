@@ -41,7 +41,7 @@ async function setupPaymentReconciliationScheduler() {
     },
   );
 
-  console.log("✅ Payment reconciliation scheduler registered: every 10 minutes");
+  // console.log("✅ Payment reconciliation scheduler registered: every 10 minutes");
 }
 
 module.exports = {

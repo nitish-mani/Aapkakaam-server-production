@@ -18,7 +18,7 @@ async function startWorkers() {
 
     await connectDatabase();
 
-    console.log("MongoDB Connected");
+    // console.log("MongoDB Connected");
 
     // ============================================================
     // Notification Worker
@@ -31,7 +31,7 @@ async function startWorkers() {
     // ============================================================
 
     NotificationOutboxService.run().catch((err) => {
-      console.error("Notification Outbox Worker stopped unexpectedly:", err);
+      // console.error("Notification Outbox Worker stopped unexpectedly:", err);
 
       process.exit(1);
     });
@@ -70,21 +70,21 @@ async function startWorkers() {
     // Startup Logs
     // ============================================================
 
-    console.log("Notification Worker Started");
+    // console.log("Notification Worker Started");
 
-    console.log("Notification Outbox Worker Started");
+    // console.log("Notification Outbox Worker Started");
 
-    console.log("Dead Letter Worker Started");
+    //  console.log("Dead Letter Worker Started");
 
-    console.log("Low Balance Worker Started");
+    // console.log("Low Balance Worker Started");
 
-    console.log("Low Balance Scheduler Started");
+    // console.log("Low Balance Scheduler Started");
 
-    console.log("Payment Reconciliation Worker Started");
+    // console.log("Payment Reconciliation Worker Started");
 
-    console.log("Payment Reconciliation Scheduler Started");
+    // console.log("Payment Reconciliation Scheduler Started");
 
-    console.log("All Workers Started");
+    // console.log("All Workers Started");
   } catch (err) {
     console.error("Worker startup failed:", err);
 

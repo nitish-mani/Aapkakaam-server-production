@@ -12,11 +12,11 @@ async function start() {
 
     await mongoose.connection.asPromise();
 
-    console.log("Notification Outbox Worker Started");
+    // console.log("Notification Outbox Worker Started");
 
     await NotificationOutboxService.run();
   } catch (error) {
-    console.error("Notification Outbox Worker Failed:", error);
+    // console.error("Notification Outbox Worker Failed:", error);
 
     process.exit(1);
   }

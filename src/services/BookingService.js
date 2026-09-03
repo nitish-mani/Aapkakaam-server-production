@@ -2029,12 +2029,7 @@ class BookingService {
       const bookingDate = normalizeDateIST(booking.bookingDate);
 
       const cacheDate = bookingDate.toISOString().slice(0, 10);
-      console.log("========== CACHE INVALIDATION ==========");
-      console.log("Booking ID:", bookingId);
-      console.log("Original bookingDate:", booking.bookingDate);
-      console.log("Normalized bookingDate:", bookingDate);
-      console.log("Cache date:", cacheDate);
-      console.log("=========================================");
+
       try {
         await Promise.all([
           CacheService.invalidateTag("vendors"),

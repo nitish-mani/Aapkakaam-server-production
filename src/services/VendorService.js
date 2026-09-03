@@ -829,7 +829,6 @@ class VendorService {
    */
   static async getVendorOrders(vendorId) {
     const startTime = Date.now();
-    console.log(vendorId);
     if (!vendorId) {
       VendorLogger.warn({
         event: "VENDOR_ORDERS_FAILED",
@@ -847,7 +846,6 @@ class VendorService {
       orderCount: bookings.length,
       duration_ms: Date.now() - startTime,
     });
-    console.log(bookings);
     return { orders: bookings };
   }
 

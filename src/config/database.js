@@ -15,7 +15,7 @@ async function connectDatabase() {
       retryReads: true,
     });
 
-    console.log(`✅ MongoDB Connected (${ENV.NODE_ENV})`);
+    // console.log(`✅ MongoDB Connected (${ENV.NODE_ENV})`);
 
     mongoose.connection.on("error", (err) => {
       console.error("❌ MongoDB Error:", err);
@@ -26,12 +26,12 @@ async function connectDatabase() {
     });
 
     mongoose.connection.on("reconnected", () => {
-      console.log("✅ MongoDB Reconnected");
+      // console.log("✅ MongoDB Reconnected");
     });
 
     process.on("SIGINT", async () => {
       await mongoose.connection.close();
-      console.log("🛑 MongoDB Connection Closed");
+      // console.log("🛑 MongoDB Connection Closed");
       process.exit(0);
     });
 

@@ -68,11 +68,11 @@ exports.signup = async (req, res, next) => {
       });
     }
 
-    // if (!validPhoneNoId) {
-    //   return res.status(400).json({
-    //     message: "Phone verification is required",
-    //   });
-    // }
+    if (!validPhoneNoId) {
+      return res.status(400).json({
+        message: "Phone verification is required",
+      });
+    }
 
     if (password.length < 6) {
       UserLogger.warn({
@@ -113,13 +113,13 @@ exports.signup = async (req, res, next) => {
       });
     }
 
-    // await OtpAuthorizationService.consume({
-    //   otpId: validPhoneNoId,
-    //   accountType: "user",
-    //   accountId: null,
-    //   purpose: "verify_phone",
-    //   target: normalizedPhone,
-    // });
+    await OtpAuthorizationService.consume({
+      otpId: validPhoneNoId,
+      accountType: "user",
+      accountId: null,
+      purpose: "verify_phone",
+      target: normalizedPhone,
+    });
 
     // Hash password and create user
 

@@ -125,18 +125,20 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
         message: "Password must be at least 6 characters",
       });
     }
-    // if (!validPhoneNoId) {
-    //   return res.status(400).json({
-    //     message: "Phone verification is required",
-    //   });
-    // }
-    // await OtpAuthorizationService.consume({
-    //   otpId: validPhoneNoId,
-    //   accountType: "vendor",
-    //   accountId: null,
-    //   purpose: "verify_phone",
-    //   target: phoneNumber,
-    // });
+
+    if (!validPhoneNoId) {
+      return res.status(400).json({
+        message: "Phone verification is required",
+      });
+    }
+
+    await OtpAuthorizationService.consume({
+      otpId: validPhoneNoId,
+      accountType: "vendor",
+      accountId: null,
+      purpose: "verify_phone",
+      target: phoneNumber,
+    });
     // ======================================================
     // JOBS
     // ======================================================
