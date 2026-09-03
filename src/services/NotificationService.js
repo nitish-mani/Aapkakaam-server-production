@@ -686,7 +686,7 @@ class NotificationService {
 
     const vendorFcmToken = vendor?.fcmToken || booking?.vendorId?.fcmToken || null;
 
-    const userName = user?.name || booking?.userId?.name || "Customer";
+    const userName = user?.name || booking?.userId?.name || vendor?.name || "Customer";
 
     const results = [];
 

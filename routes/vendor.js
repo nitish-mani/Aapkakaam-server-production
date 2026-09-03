@@ -11,6 +11,7 @@ const Razorpay = require("razorpay");
 const { VendorLogger } = require("../src/logger/index");
 const bcrypt = require("bcrypt");
 const Vendor = require("../models/vendor");
+const User = require("../models/user");
 const Transaction = require("../models/transaction");
 const VendorSignupPayment = require("../models/vendorSignupPayment");
 const ENV = require("../src/config/env");
@@ -124,18 +125,18 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
         message: "Password must be at least 6 characters",
       });
     }
-    if (!validPhoneNoId) {
-      return res.status(400).json({
-        message: "Phone verification is required",
-      });
-    }
-    await OtpAuthorizationService.consume({
-      otpId: validPhoneNoId,
-      accountType: "vendor",
-      accountId: null,
-      purpose: "verify_phone",
-      target: phoneNumber,
-    });
+    // if (!validPhoneNoId) {
+    //   return res.status(400).json({
+    //     message: "Phone verification is required",
+    //   });
+    // }
+    // await OtpAuthorizationService.consume({
+    //   otpId: validPhoneNoId,
+    //   accountType: "vendor",
+    //   accountId: null,
+    //   purpose: "verify_phone",
+    //   target: phoneNumber,
+    // });
     // ======================================================
     // JOBS
     // ======================================================
@@ -171,22 +172,27 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
     // CHECK EXISTING VENDOR
     // ======================================================
 
-    const existingVendor = await Vendor.exists({
-      phoneNo: phoneNumber,
-    });
+    const [existingUser, existingVendor] = await Promise.all([
+      User.exists({
+        phoneNo: phoneNumber,
+      }),
+      Vendor.exists({
+        phoneNo: phoneNumber,
+      }),
+    ]);
 
-    if (existingVendor) {
+    if (existingVendor || existingUser) {
       VendorLogger.warn(
         {
           requestId,
           phoneNo: cleanPhone.slice(-4),
         },
-        "Vendor signup blocked because vendor already exists",
+        "Vendor signup blocked because number already exists",
       );
 
       return res.status(409).json({
         success: false,
-        message: "Vendor with this mobile number already exists",
+        message: "Mobile number already exists!",
       });
     }
 

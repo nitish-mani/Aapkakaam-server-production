@@ -4,6 +4,21 @@ const axios = require("axios");
 const ENV = require("../../config/env");
 const logger = require("../../logger/logger");
 
+function getEnglishOnlyText(value) {
+  if (!value) {
+    return "Customer";
+  }
+
+  const text = String(value).trim();
+
+  // केवल English letters, numbers और सामान्य allowed characters
+  // अगर कोई भी non-English/Unicode character है, पूरा नाम reject कर दो
+  if (!/^[A-Za-z0-9\s.'-]+$/.test(text)) {
+    return "Customer";
+  }
+
+  return text;
+}
 class SmsProvider {
   /**
    * Send SMS Notification
@@ -28,6 +43,7 @@ class SmsProvider {
    *   NAME
    *   DATE
    */
+
   static async send(notification) {
     const started = Date.now();
 
@@ -85,10 +101,10 @@ class SmsProvider {
 
           throw error;
         }
-
+        const safeName = getEnglishOnlyText(name);
         url =
           `${ENV.FAST2SMSPAYMENTSUCCESS}` +
-          `variables_values=${encodeURIComponent(name)}%7C` +
+          `variables_values=${encodeURIComponent(safeName)}%7C` +
           `${encodeURIComponent(balance)}%7C` +
           `&flash=1` +
           `&numbers=${encodeURIComponent(phone)}` +
@@ -114,7 +130,7 @@ class SmsProvider {
 
         url =
           `${ENV.FAST2SMSPAYMENTFAILED}` +
-          `variables_values=${encodeURIComponent(name)}%7C` +
+          `variables_values=${encodeURIComponent(safeName)}%7C` +
           `${encodeURIComponent(balance)}%7C` +
           `&flash=1` +
           `&numbers=${encodeURIComponent(phone)}` +
@@ -168,7 +184,7 @@ class SmsProvider {
           throw error;
         }
 
-        const normalizedName = String(name).toUpperCase().slice(0, 11);
+        const normalizedName = getEnglishOnlyText(name).toUpperCase().slice(0, 11);
 
         const userData = `Name - ${normalizedName} and Mob - ${userPhoneNo}`;
 
@@ -216,7 +232,7 @@ class SmsProvider {
           throw error;
         }
 
-        const normalizedName = String(name).toUpperCase().slice(0, 20);
+        const normalizedName = getEnglishOnlyText(name).toUpperCase().slice(0, 20);
 
         url =
           `${ENV.FAST2SMSCANCEL}` +
@@ -249,82 +265,82 @@ class SmsProvider {
     // Send SMS
     // --------------------------------------------------
 
-    try {
-      const response = await axios.get(url, {
-        timeout: 15000,
+    // try {
+    //   const response = await axios.get(url, {
+    //     timeout: 15000,
 
-        validateStatus: (status) => status >= 200 && status < 300,
-      });
+    //     validateStatus: (status) => status >= 200 && status < 300,
+    //   });
 
-      const duration = Date.now() - started;
+    //   const duration = Date.now() - started;
 
-      logger.info(
-        {
-          event: "SMS_SENT",
+    //   logger.info(
+    //     {
+    //       event: "SMS_SENT",
 
-          notificationId: _id,
+    //       notificationId: _id,
 
-          requestId,
+    //       requestId,
 
-          template,
+    //       template,
 
-          phone,
+    //       phone,
 
-          provider: "Fast2SMS",
+    //       provider: "Fast2SMS",
 
-          duration,
+    //       duration,
 
-          providerMessageId: response.data?.request_id || response.data?.requestId || null,
+    //       providerMessageId: response.data?.request_id || response.data?.requestId || null,
 
-          providerStatus: response.data?.return || response.data?.status || null,
-        },
-        "SMS sent successfully",
-      );
+    //       providerStatus: response.data?.return || response.data?.status || null,
+    //     },
+    //     "SMS sent successfully",
+    //   );
 
-      return {
-        provider: "Fast2SMS",
+    //   return {
+    //     provider: "Fast2SMS",
 
-        accepted: true,
+    //     accepted: true,
 
-        success: true,
+    //     success: true,
 
-        status: response.data?.return || response.data?.status || "SUCCESS",
+    //     status: response.data?.return || response.data?.status || "SUCCESS",
 
-        providerMessageId: response.data?.request_id || response.data?.requestId || null,
+    //     providerMessageId: response.data?.request_id || response.data?.requestId || null,
 
-        latency: duration,
-      };
-    } catch (error) {
-      const duration = Date.now() - started;
+    //     latency: duration,
+    //   };
+    // } catch (error) {
+    //   const duration = Date.now() - started;
 
-      logger.error(
-        {
-          event: "SMS_SEND_FAILED",
+    //   logger.error(
+    //     {
+    //       event: "SMS_SEND_FAILED",
 
-          notificationId: _id,
+    //       notificationId: _id,
 
-          requestId,
+    //       requestId,
 
-          template,
+    //       template,
 
-          phone,
+    //       phone,
 
-          provider: "Fast2SMS",
+    //       provider: "Fast2SMS",
 
-          duration,
+    //       duration,
 
-          error: {
-            message: error.message,
-            code: error.code,
-            status: error.response?.status,
-            data: error.response?.data,
-          },
-        },
-        "SMS sending failed",
-      );
+    //       error: {
+    //         message: error.message,
+    //         code: error.code,
+    //         status: error.response?.status,
+    //         data: error.response?.data,
+    //       },
+    //     },
+    //     "SMS sending failed",
+    //   );
 
-      throw error;
-    }
+    //   throw error;
+    // }
   }
 }
 

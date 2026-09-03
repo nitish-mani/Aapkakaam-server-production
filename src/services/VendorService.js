@@ -1988,5 +1988,38 @@ class VendorService {
     };
   }
 }
+function getVendorWageByType(vendor, requestedType) {
+  if (!vendor || !requestedType) {
+    return {
+      wageRate: 0,
+      wageRateType: "",
+    };
+  }
 
+  const normalizedType = String(requestedType).trim().toLowerCase();
+
+  const jobs = Array.isArray(vendor.type) ? vendor.type : [];
+  const wageRates = Array.isArray(vendor.wageRate) ? vendor.wageRate : [];
+  const wageRateTypes = Array.isArray(vendor.wageRateType) ? vendor.wageRateType : [];
+
+  // Find the requested job index safely
+  const jobIndex = jobs.findIndex(
+    (job) =>
+      String(job || "")
+        .trim()
+        .toLowerCase() === normalizedType,
+  );
+
+  if (jobIndex === -1) {
+    return {
+      wageRate: 0,
+      wageRateType: "",
+    };
+  }
+
+  return {
+    wageRate: Number(wageRates[jobIndex] || 0),
+    wageRateType: String(wageRateTypes[jobIndex] || ""),
+  };
+}
 module.exports = VendorService;
