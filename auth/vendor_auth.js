@@ -435,7 +435,7 @@ exports.login = async (req, res, next) => {
         {
           event: "VENDOR_LOGIN_VENDOR_NOT_FOUND",
 
-          phoneNo: maskPhone(normalizedPhone),
+          phoneNo: normalizedPhone,
 
           requestId: req.requestId,
 

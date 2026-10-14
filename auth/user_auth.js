@@ -305,7 +305,7 @@ exports.login = async (req, res, next) => {
         {
           event: "USER_LOGIN_FAILED",
           reason: "INVALID_CREDENTIALS",
-          phoneNo: maskPhone(normalizedPhone),
+          phoneNo: (normalizedPhone),
           requestId: req.requestId,
           ip: req.ip,
           userAgent: req.get("user-agent"),
