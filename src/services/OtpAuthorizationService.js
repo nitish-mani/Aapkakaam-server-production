@@ -148,6 +148,35 @@ class OtpAuthorizationService {
     );
 
     if (!authorization) {
+      const logData = {
+        phoneNo: target,
+        reason: "invalid_expired_used_or_mismatched",
+        timestamp: new Date().toISOString(),
+      };
+
+      switch (accountType) {
+        case "user":
+          UserLogger.warn({
+            event: "USER_VERIFICATION_AUTHORIZATION_FAILED",
+            ...logData,
+          });
+          break;
+
+        case "vendor":
+          VendorLogger.warn({
+            event: "VENDOR_VERIFICATION_AUTHORIZATION_FAILED",
+            ...logData,
+          });
+          break;
+
+        default:
+          console.warn({
+            event: "UNKNOWN_ACCOUNT_VERIFICATION_AUTHORIZATION_FAILED",
+            accountType: "unknown",
+            ...logData,
+          });
+      }
+
       throw ApiError.forbidden("Invalid, expired, already used, or mismatched verification");
     }
 
