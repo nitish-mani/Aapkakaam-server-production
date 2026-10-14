@@ -181,7 +181,7 @@ class VendorService {
       event: "OTP_SENT",
       purpose: "verify_phone",
       accountType: "vendor",
-      phone: this.maskPhone(normalizedPhone),
+      phone: (normalizedPhone),
       duration_ms: Date.now() - startTime,
     });
 
@@ -332,7 +332,7 @@ class VendorService {
       event: "OTP_VERIFIED",
       purpose: "verify_phone",
       accountType: "vendor",
-      phone: this.maskPhone(result.target),
+      phone: (result.target),
       duration_ms: Date.now() - startTime,
     });
 
