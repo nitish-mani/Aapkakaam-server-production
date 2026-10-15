@@ -22,6 +22,7 @@ const VendorLeaveService = require("./VendorLeaveService");
 const OtpAuthorizationService = require("./OtpAuthorizationService");
 const { normalizeDateIST } = require("../utils/dateUtils");
 const { VendorLogger } = require("../logger/index");
+const VendorSearchAnalyticsService = require("./vendorSearchAnalyticsService");
 
 const JOB_COMMISSION = {
   labour: 30,
@@ -181,7 +182,7 @@ class VendorService {
       event: "OTP_SENT",
       purpose: "verify_phone",
       accountType: "vendor",
-      phone: (normalizedPhone),
+      phone: normalizedPhone,
       duration_ms: Date.now() - startTime,
     });
 
@@ -332,7 +333,7 @@ class VendorService {
       event: "OTP_VERIFIED",
       purpose: "verify_phone",
       accountType: "vendor",
-      phone: (result.target),
+      phone: result.target,
       duration_ms: Date.now() - startTime,
     });
 
@@ -1115,7 +1116,15 @@ class VendorService {
    * Get available vendors with smart pagination
    */
 
-  static async getAvailableVendors(type, pincode, bookingDate1, page, minRating, minWageRate) {
+  static async getAvailableVendors(
+    type,
+    pincode,
+    bookingDate1,
+    page,
+    minRating,
+    minWageRate,
+    searchContext = {},
+  ) {
     const startTime = Date.now();
 
     // ============================================================
@@ -1475,6 +1484,58 @@ class VendorService {
         tags: ["vendors", "search", normalizedType, normalizedPincode],
       },
     );
+
+    // ============================================================
+    // VENDOR SEARCH ANALYTICS
+    // ============================================================
+
+    try {
+      const { searchBy, searchById } = searchContext;
+
+      if (
+        ["User", "Vendor"].includes(searchBy) &&
+        searchById &&
+        mongoose.Types.ObjectId.isValid(searchById)
+      ) {
+        await VendorSearchAnalyticsService.recordSearch({
+          searchBy,
+          searchById,
+
+          sessionId: searchContext.sessionId || null,
+
+          type: normalizedType,
+          pincode: normalizedPincode,
+          bookingDate,
+
+          minRating: normalizedMinRating,
+          minWageRate: normalizedMinWageRate,
+          page: currentPage,
+
+          resultCount: result.vendors.length,
+          candidateCount: result.total,
+
+          vendorIds: result.vendors.map((vendor) => vendor._id),
+
+          durationMs: Date.now() - startTime,
+          platform: searchContext.platform || "unknown",
+
+          // CacheService.remember does not currently expose
+          // cache hit/miss metadata.
+          cacheHit: null,
+        });
+      } else {
+        VendorLogger.warn({
+          event: "VENDOR_SEARCH_ANALYTICS_SKIPPED",
+          reason: "Missing or invalid authenticated actor",
+        });
+      }
+    } catch (error) {
+      // Analytics failure must not break the vendor search API.
+      VendorLogger.error({
+        event: "VENDOR_SEARCH_ANALYTICS_CAPTURE_FAILED",
+        message: error.message,
+      });
+    }
 
     // ============================================================
     // DEVELOPMENT LOGGING ONLY

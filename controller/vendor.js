@@ -188,9 +188,25 @@ exports.vendor_controller_getOne = asyncHandler(async (req, res) => {
 exports.vendor_controller_getAvailableVendor = asyncHandler(async (req, res) => {
   const { type, pincode, bookingDate, page, minRating, minWageRate } = req.params;
 
-  const userIdentifier = req.auth?.id
-    ? String(req.auth.id)
-    : `${req.ip}-${req.headers["user-agent"]?.substring(0, 50)}`;
+  // Determine actor from authenticated middleware.
+  const role = req.auth?.role;
+
+  if (!req.auth?.id || !["user", "vendor"].includes(role)) {
+    throw ApiError.unauthorized("Authentication required.");
+  }
+
+  const platformHeader = String(req.headers["user-agent"] || "unknown").toLowerCase();
+
+  const allowedPlatforms = ["android", "ios", "website", "unknown"];
+
+  const platform = platformHeader.slice(0, 20);
+
+  const searchContext = {
+    searchBy: role === "vendor" ? "Vendor" : "User",
+    searchById: req.auth.id,
+    sessionId: req.sessionID || null,
+    platform,
+  };
 
   const result = await VendorService.getAvailableVendors(
     type,
@@ -199,7 +215,7 @@ exports.vendor_controller_getAvailableVendor = asyncHandler(async (req, res) => 
     parseInt(page, 10) || 1,
     parseFloat(minRating) || 0,
     parseFloat(minWageRate) || 0,
-    userIdentifier,
+    searchContext,
   );
 
   res.status(200).json(result);

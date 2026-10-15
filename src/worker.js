@@ -37,6 +37,30 @@ async function startWorkers() {
     });
 
     // ============================================================
+    // Notification Outbox Worker
+    // ============================================================
+
+    NotificationOutboxService.run().catch((err) => {
+      console.error("Notification Outbox Worker stopped unexpectedly:", err);
+
+      process.exit(1);
+    });
+
+    // ============================================================
+    // Vendor Search Analytics Worker
+    // ============================================================
+
+    const {
+      run: runVendorSearchAnalyticsWorker,
+    } = require("./workers/vendorSearchAnalyticsWorker");
+
+    runVendorSearchAnalyticsWorker().catch((err) => {
+      console.error("Vendor Search Analytics Worker stopped unexpectedly:", err);
+
+      process.exit(1);
+    });
+
+    // ============================================================
     // Dead Letter Worker
     // ============================================================
 
