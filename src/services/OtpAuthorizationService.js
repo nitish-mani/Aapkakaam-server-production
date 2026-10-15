@@ -5,6 +5,7 @@ const mongoose = require("mongoose");
 const OtpAuth = require("../../models/otpAuth");
 const ApiError = require("../utils/ApiError");
 
+const { VendorLogger } = require("../logger/index");
 class OtpAuthorizationService {
   /**
    * Atomically validates and consumes an OTP authorization.

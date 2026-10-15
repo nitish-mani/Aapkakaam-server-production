@@ -88,7 +88,7 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
     VendorLogger.info(
       {
         requestId,
-        phoneNo: phoneNo ? String(phoneNo).slice(-4) : null,
+        phoneNo: phoneNo ? String(phoneNo) : null,
         hasFcmToken: Boolean(fcmToken),
         fcmTokenLength: fcmToken ? String(fcmToken).length : 0,
       },
@@ -187,7 +187,7 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
       VendorLogger.warn(
         {
           requestId,
-          phoneNo: cleanPhone.slice(-4),
+          phoneNo: cleanPhone,
         },
         "Vendor signup blocked because number already exists",
       );

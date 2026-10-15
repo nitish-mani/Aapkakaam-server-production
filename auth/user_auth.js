@@ -16,6 +16,16 @@ const secretKey = ENV.JWT_USER_SECRET;
 
 exports.signup = async (req, res, next) => {
   const startTime = Date.now();
+  UserLogger.warn(
+    {
+      event: "USER_SIGNUP_INITIATED",
+      phoneNo: req.body.phoneNo,
+      requestId: req.requestId,
+      ip: req.ip,
+      userAgent: req.get("user-agent"),
+    },
+    "User signup initiated",
+  );
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -167,6 +177,7 @@ exports.signup = async (req, res, next) => {
     UserLogger.error(
       {
         event: "USER_SIGNUP_ERROR",
+        phoneNo: req.body.phoneNo,
         requestId: req.requestId,
         ip: req.ip,
         userAgent: req.get("user-agent"),
@@ -305,7 +316,7 @@ exports.login = async (req, res, next) => {
         {
           event: "USER_LOGIN_FAILED",
           reason: "INVALID_CREDENTIALS",
-          phoneNo: (normalizedPhone),
+          phoneNo: normalizedPhone,
           requestId: req.requestId,
           ip: req.ip,
           userAgent: req.get("user-agent"),
