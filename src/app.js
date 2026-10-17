@@ -27,6 +27,8 @@ const adminVersionRoutes = require("../routes/adminVersion");
 
 const websiteMaintenanceRoutes = require("../routes/maintenanceRoutes");
 const adminWebsiteMaintenanceRoutes = require("../routes/adminMaintenanceRoutes");
+const homeBannerRoutes = require("../routes/homeBanner");
+const adminHomeBannerRoutes = require("../routes/adminHomeBanner");
 
 const systemRoutes = require("../routes/system");
 const app = express();
@@ -130,6 +132,9 @@ app.use("/api/app-version", appVersionRoutes);
 app.use("/api/website-maintenance", websiteMaintenanceRoutes);
 
 app.use("/api/admin/website-maintenance", adminWebsiteMaintenanceRoutes);
+
+app.use("/api/home-banner", homeBannerRoutes);
+app.use("/api/admin/home-banner", adminHomeBannerRoutes);
 /* ---------- 404 handler ----------------------------------------------- */
 app.use((req, res) => {
   res.status(404).json({
