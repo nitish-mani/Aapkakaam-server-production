@@ -30,7 +30,7 @@ const adminWebsiteMaintenanceRoutes = require("../routes/adminMaintenanceRoutes"
 const homeBannerRoutes = require("../routes/homeBanner");
 const adminHomeBannerRoutes = require("../routes/adminHomeBanner");
 const adminNotificationRoutes = require("../routes/adminNotificationRoutes");
-
+const signupFeeRoutes = require("../routes/signupFeeRoutes");
 const systemRoutes = require("../routes/system");
 const app = express();
 
@@ -138,7 +138,7 @@ app.use("/api/home-banner", homeBannerRoutes);
 app.use("/api/admin/home-banner", adminHomeBannerRoutes);
 
 app.use("/api/admin", adminNotificationRoutes);
-
+app.use("/api", signupFeeRoutes);
 /* ---------- 404 handler ----------------------------------------------- */
 app.use((req, res) => {
   res.status(404).json({

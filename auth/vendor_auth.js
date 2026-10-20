@@ -15,368 +15,370 @@ const secretKey = ENV.JWT_VENDOR_SECRET;
 //// for vendor signup /////////
 ////////////////////////////////
 
-// // exports.signup = async (req, res, next) => {
-// //   const startTime = Date.now();
-
-// //   try {
-// //     const errors = validationResult(req);
-
-// //     if (!errors.isEmpty()) {
-// //       VendorLogger.warn(
-// //         {
-// //           event: "VENDOR_SIGNUP_VALIDATION_FAILED",
-// //           errors: errors.array(),
-// //           requestId: req.requestId,
-// //           ip: req.ip,
-// //         },
-// //         "Vendor signup validation failed",
-// //       );
-
-// //       return res.status(422).json({
-// //         message: "Validation failed.",
-// //         errors: errors.array(),
-// //       });
-// //     }
-
-// //     const {
-// //       name,
-// //       phoneNo,
-// //       email,
-// //       password,
-// //       type,
-// //       experience,
-// //       gender,
-// //       sharedBy,
-// //       cd,
-// //       fcmToken,
-// //       validPhoneNoId,
-// //       agreedToTnCnP,
-// //     } = req.body;
-
-// //     // Normalize phone
-// //     const normalizedPhone = String(phoneNo || "")
-// //       .trim()
-// //       .replace(/\s+/g, "");
-
-// //     // Basic required-field validation
-// //     if (!name || !normalizedPhone || !password || !Array.isArray(type)) {
-// //       VendorLogger.warn({
-// //         event: "VENDOR_SIGNUP_REQUIRED_FIELDS_MISSING",
-// //         requestId: req.requestId,
-// //         ip: req.ip,
-// //       });
-
-// //       return res.status(400).json({
-// //         message: "Name, phone number, password, and job types are required",
-// //       });
-// //     }
-
-// //     // --------------------------------------------------
-// //     // Vendor can select maximum 5 jobs
-// //     // --------------------------------------------------
-
-// //     if (type.length < 1 || type.length > 5) {
-// //       return res.status(400).json({
-// //         message: "A vendor can select between 1 and 5 jobs",
-// //       });
-// //     }
-
-// //     // Normalize jobs and remove duplicates
-// //     const normalizedTypes = [
-// //       ...new Set(type.map((job) => String(job).trim().toLowerCase()).filter(Boolean)),
-// //     ];
-
-// //     // Validate after normalization
-// //     if (
-// //       normalizedTypes.length < 1 ||
-// //       normalizedTypes.length > 5 ||
-// //       normalizedTypes.length !== type.length
-// //     ) {
-// //       return res.status(400).json({
-// //         message: "Jobs must be unique and between 1 and 5",
-// //       });
-// //     }
-
-// //     // --------------------------------------------------
-// //     // Password validation
-// //     // --------------------------------------------------
-
-// //     if (password.length < 6) {
-// //       VendorLogger.warn({
-// //         event: "VENDOR_SIGNUP_PASSWORD_POLICY_FAILED",
-// //         requestId: req.requestId,
-// //         ip: req.ip,
-// //       });
-
-// //       return res.status(400).json({
-// //         message: "Password must be at least 6 characters long",
-// //       });
-// //     }
-
-// //     // --------------------------------------------------
-// //     // Check duplicate phone
-// //     // Run both DB queries in parallel
-// //     // --------------------------------------------------
+exports.signup = async (req, res, next) => {
+  const startTime = Date.now();
+
+  try {
+    const errors = validationResult(req);
+
+    if (!errors.isEmpty()) {
+      VendorLogger.warn(
+        {
+          event: "VENDOR_SIGNUP_VALIDATION_FAILED",
+          errors: errors.array(),
+          requestId: req.requestId,
+          ip: req.ip,
+        },
+        "Vendor signup validation failed",
+      );
+
+      return res.status(422).json({
+        message: "Validation failed.",
+        errors: errors.array(),
+      });
+    }
+
+    const {
+      name,
+      phoneNo,
+      email,
+      password,
+      type,
+      experience,
+      gender,
+      sharedBy,
+      cd,
+      fcmToken,
+      validPhoneNoId,
+      agreedToTnCnP,
+    } = req.body;
+
+    // Normalize phone
+    const normalizedPhone = String(phoneNo || "")
+      .trim()
+      .replace(/\s+/g, "");
+
+    // Basic required-field validation
+    if (!name || !normalizedPhone || !password || !Array.isArray(type)) {
+      VendorLogger.warn({
+        event: "VENDOR_SIGNUP_REQUIRED_FIELDS_MISSING",
+        requestId: req.requestId,
+        ip: req.ip,
+      });
+
+      return res.status(400).json({
+        message: "Name, phone number, password, and job types are required",
+      });
+    }
+
+    // --------------------------------------------------
+    // Vendor can select maximum 5 jobs
+    // --------------------------------------------------
+
+    if (type.length < 1 || type.length > 5) {
+      return res.status(400).json({
+        message: "A vendor can select between 1 and 5 jobs",
+      });
+    }
+
+    // Normalize jobs and remove duplicates
+    const normalizedTypes = [
+      ...new Set(type.map((job) => String(job).trim().toLowerCase()).filter(Boolean)),
+    ];
+
+    // Validate after normalization
+    if (
+      normalizedTypes.length < 1 ||
+      normalizedTypes.length > 5 ||
+      normalizedTypes.length !== type.length
+    ) {
+      return res.status(400).json({
+        message: "Jobs must be unique and between 1 and 5",
+      });
+    }
+
+    // --------------------------------------------------
+    // Password validation
+    // --------------------------------------------------
+
+    if (password.length < 6) {
+      VendorLogger.warn({
+        event: "VENDOR_SIGNUP_PASSWORD_POLICY_FAILED",
+        requestId: req.requestId,
+        ip: req.ip,
+      });
+
+      return res.status(400).json({
+        message: "Password must be at least 6 characters long",
+      });
+    }
+
+    // // --------------------------------------------------
+    // // Check duplicate phone
+    // // Run both DB queries in parallel
+    // // --------------------------------------------------
 
-// //     const [existingUser, existingVendor] = await Promise.all([
-// //       User.exists({
-// //         phoneNo: normalizedPhone,
-// //       }),
+    // const [existingUser, existingVendor] = await Promise.all([
+    //   User.exists({
+    //     phoneNo: normalizedPhone,
+    //   }),
 
-// //       Vendor.exists({
-// //         phoneNo: normalizedPhone,
-// //       }),
-// //     ]);
+    //   Vendor.exists({
+    //     phoneNo: normalizedPhone,
+    //   }),
+    // ]);
 
-// //     if (existingVendor || existingUser) {
-// //       VendorLogger.warn(
-// //         {
-// //           event: "VENDOR_SIGNUP_DUPLICATE_PHONE",
-// //           phoneNo: maskPhone(normalizedPhone),
-// //           requestId: req.requestId,
-// //           ip: req.ip,
-// //         },
-// //         "Vendor signup blocked: duplicate phone number",
-// //       );
+    // if (existingVendor || existingUser) {
+    //   VendorLogger.warn(
+    //     {
+    //       event: "VENDOR_SIGNUP_DUPLICATE_PHONE",
+    //       phoneNo: maskPhone(normalizedPhone),
+    //       requestId: req.requestId,
+    //       ip: req.ip,
+    //     },
+    //     "Vendor signup blocked: duplicate phone number",
+    //   );
 
-// //       return res.status(409).json({
-// //         message: "Mobile number already exists!",
-// //       });
-// //     }
+    //   return res.status(409).json({
+    //     message: "Mobile number already exists!",
+    //   });
+    // }
 
-// //     // --------------------------------------------------
-// //     // Fixed commission
-// //     // Every vendor = ₹50 commission
-// //     // --------------------------------------------------
+    // --------------------------------------------------
+    // Fixed commission
+    // Every vendor = ₹50 commission
+    // --------------------------------------------------
 
-// //     const commission = 50;
+    const commission = 50;
 
-// //     // 5x commission = ₹250
-// //     const initialBalance = commission * 5;
+    // 5x commission = ₹250
+    const initialBalance = commission * 5;
 
-// //     // --------------------------------------------------
-// //     // Hash password
-// //     // --------------------------------------------------
+    // --------------------------------------------------
+    // Hash password
+    // --------------------------------------------------
 
-// //     const hashedPw = await bcrypt.hash(password, ENV.BCRYPT_ROUNDS || 12);
+    const hashedPw = await bcrypt.hash(password, ENV.BCRYPT_ROUNDS || 12);
 
-// //     // --------------------------------------------------
-// //     // Create vendor
-// //     // --------------------------------------------------
+    // --------------------------------------------------
+    // Create vendor
+    // --------------------------------------------------
 
-// //     const vendor = new Vendor({
-// //       name,
-// //       phoneNo: normalizedPhone,
+    const vendor = new Vendor({
+      name,
+      phoneNo: normalizedPhone,
 
-// //       email: email || "",
+      email: email || "",
 
-// //       password: hashedPw,
+      password: hashedPw,
 
-// //       // IMPORTANT:
-// //       // Multiple jobs
-// //       type: normalizedTypes,
+      // IMPORTANT:
+      // Multiple jobs
+      type: normalizedTypes,
 
-// //       gender,
+      gender,
 
-// //       experience,
+      experience,
 
-// //       // Fixed commission
-// //       commission,
+      // Fixed commission
+      commission,
 
-// //       wageRate: 0,
+      wageRate: 0,
 
-// //       wageRateType: "",
+      wageRateType: "",
 
-// //       // ₹250 + existing ₹50 bonus
-// //       balance: initialBalance + 50,
+      balance: initialBalance,
 
-// //       shareBy: sharedBy,
+      shareBy: sharedBy,
 
-// //       cd,
+      cd,
 
-// //       fcmToken,
+      fcmToken,
 
-// //       verifyPhoneNo: true,
+      verifyPhoneNo: true,
 
-// //       agreedToTnCnP: Boolean(agreedToTnCnP),
+      agreedToTnCnP: Boolean(agreedToTnCnP),
 
-// //       accountCreatedOn: new Date(),
-// //     });
+      accountCreatedOn: new Date(),
+    });
 
-// //     // --------------------------------------------------
-// //     // Save vendor
-// //     // --------------------------------------------------
+    // --------------------------------------------------
+    // Save vendor
+    // --------------------------------------------------
 
-// //     const result = await vendor.save();
+    const result = await vendor.save();
 
-// //     // --------------------------------------------------
-// //     // Success log
-// //     // --------------------------------------------------
+    // --------------------------------------------------
+    // Success log
+    // --------------------------------------------------
 
-// //     VendorLogger.info(
-// //       {
-// //         event: "VENDOR_SIGNUP_SUCCESS",
+    VendorLogger.info(
+      {
+        event: "VENDOR_SIGNUP_SUCCESS",
 
-// //         vendorId: result._id,
+        vendorId: result._id,
 
-// //         phoneNo: maskPhone(normalizedPhone),
+        phoneNo: maskPhone(normalizedPhone),
 
-// //         type: normalizedTypes,
+        type: normalizedTypes,
 
-// //         requestId: req.requestId,
+        requestId: req.requestId,
 
-// //         ip: req.ip,
+        ip: req.ip,
 
-// //         duration: Date.now() - startTime,
-// //       },
+        duration: Date.now() - startTime,
+      },
 
-// //       "Vendor signup successful",
-// //     );
+      "Vendor signup successful",
+    );
 
-// //     // --------------------------------------------------
-// //     // Referral processing
-// //     //
-// //     // Do NOT make signup wait for referral processing.
-// //     // This improves response time under load.
-// //     // --------------------------------------------------
+    // --------------------------------------------------
+    // Referral processing
+    //
+    // Do NOT make signup wait for referral processing.
+    // This improves response time under load.
+    // --------------------------------------------------
 
-// //     if (sharedBy && cd) {
-// //       handleVendorReferral(sharedBy, cd, vendor, name, normalizedPhone).catch((error) => {
-// //         VendorLogger.error({
-// //           event: "VENDOR_REFERRAL_UNHANDLED_ERROR",
-// //           vendorId: vendor._id,
-// //           sharedBy,
-// //           sharedByType: cd,
-// //           error: error.message,
-// //         });
-// //       });
-// //     }
+    if (sharedBy && cd) {
+      handleVendorReferral(sharedBy, cd, vendor, name, normalizedPhone).catch((error) => {
+        VendorLogger.error({
+          event: "VENDOR_REFERRAL_UNHANDLED_ERROR",
+          vendorId: vendor._id,
+          sharedBy,
+          sharedByType: cd,
+          error: error.message,
+        });
+      });
+    }
 
-// //     // --------------------------------------------------
-// //     // Response
-// //     // --------------------------------------------------
+    // --------------------------------------------------
+    // Response
+    // --------------------------------------------------
 
-// //     return res.status(201).json({
-// //       message: "Vendor created successfully!",
+    return res.status(200).json({
+      success: true,
+      message: "Vendor created successfully!",
 
-// //       vendorId: result._id,
+      vendorId: result._id,
+      signupFee: 0,
+      isFreeSignup: true,
 
-// //       // Always ₹50
-// //       commission,
+      // Always ₹50
+      commission,
 
-// //       initialBalance,
-// //     });
-// //   } catch (err) {
-// //     VendorLogger.error(
-// //       {
-// //         event: "VENDOR_SIGNUP_ERROR",
+      initialBalance,
+    });
+  } catch (err) {
+    VendorLogger.error(
+      {
+        event: "VENDOR_SIGNUP_ERROR",
 
-// //         requestId: req.requestId,
+        requestId: req.requestId,
 
-// //         ip: req.ip,
+        ip: req.ip,
 
-// //         error: err.message,
+        error: err.message,
 
-// //         stack: err.stack,
-// //       },
+        stack: err.stack,
+      },
 
-// //       "Vendor signup failed",
-// //     );
+      "Vendor signup failed",
+    );
 
-// //     if (!err.statusCode) {
-// //       err.statusCode = 500;
-// //     }
+    if (!err.statusCode) {
+      err.statusCode = 500;
+    }
 
-// //     next(err);
-// //   }
-// // };
+    next(err);
+  }
+};
 
 // ////////////////////////////////////////
 // //// Vendor referral handling /////////
 // ////////////////////////////////////////
 
-// async function handleVendorReferral(sharedBy, cd, newVendor, name, phoneNo) {
-//   try {
-//     let referrerModel;
+async function handleVendorReferral(sharedBy, cd, newVendor, name, phoneNo) {
+  try {
+    let referrerModel;
 
-//     let bonusUpdate = {};
+    let bonusUpdate = {};
 
-//     switch (cd) {
-//       case "user":
-//         referrerModel = User;
-//         break;
+    switch (cd) {
+      case "user":
+        referrerModel = User;
+        break;
 
-//       case "vendor":
-//         referrerModel = Vendor;
-//         break;
+      case "vendor":
+        referrerModel = Vendor;
+        break;
 
-//       case "employee":
-//         referrerModel = Employee;
-//         break;
+      case "employee":
+        referrerModel = Employee;
+        break;
 
-//       default:
-//         return;
-//     }
+      default:
+        return;
+    }
 
-//     // --------------------------------------------------
-//     // Update referrer's bonus
-//     // --------------------------------------------------
+    // --------------------------------------------------
+    // Update referrer's bonus
+    // --------------------------------------------------
 
-//     await referrerModel.findByIdAndUpdate(sharedBy, bonusUpdate);
+    await referrerModel.findByIdAndUpdate(sharedBy, bonusUpdate);
 
-//     // --------------------------------------------------
-//     // Create share record
-//     // --------------------------------------------------
+    // --------------------------------------------------
+    // Create share record
+    // --------------------------------------------------
 
-//     const shareRecord = new Share({
-//       userId: cd === "user" ? sharedBy : undefined,
+    const shareRecord = new Share({
+      userId: cd === "user" ? sharedBy : undefined,
 
-//       vendorId: cd === "vendor" ? sharedBy : undefined,
+      vendorId: cd === "vendor" ? sharedBy : undefined,
 
-//       employeeId: cd === "employee" ? sharedBy : undefined,
-//       name: newVendor.name,
-//       phoneNo: newVendor.phoneNo,
+      employeeId: cd === "employee" ? sharedBy : undefined,
+      name: newVendor.name,
+      phoneNo: newVendor.phoneNo,
 
-//       status: "completed",
+      status: "completed",
 
-//       shareDate: new Date(),
-//     });
+      shareDate: new Date(),
+    });
 
-//     await shareRecord.save();
+    await shareRecord.save();
 
-//     VendorLogger.info({
-//       event: "VENDOR_REFERRAL_COMPLETED",
+    VendorLogger.info({
+      event: "VENDOR_REFERRAL_COMPLETED",
 
-//       vendorId: newVendor._id,
+      vendorId: newVendor._id,
 
-//       sharedBy,
+      sharedBy,
 
-//       sharedByType: cd,
-//     });
+      sharedByType: cd,
+    });
 
-//     // --------------------------------------------------
-//     // Update share count
-//     // --------------------------------------------------
+    // --------------------------------------------------
+    // Update share count
+    // --------------------------------------------------
 
-//     await referrerModel.findByIdAndUpdate(sharedBy, {
-//       $inc: {
-//         shareCount: 1,
-//       },
-//     });
-//   } catch (error) {
-//     VendorLogger.error({
-//       event: "VENDOR_REFERRAL_FAILED",
+    await referrerModel.findByIdAndUpdate(sharedBy, {
+      $inc: {
+        shareCount: 1,
+      },
+    });
+  } catch (error) {
+    VendorLogger.error({
+      event: "VENDOR_REFERRAL_FAILED",
 
-//       vendorId: newVendor?._id,
+      vendorId: newVendor?._id,
 
-//       sharedBy,
+      sharedBy,
 
-//       sharedByType: cd,
+      sharedByType: cd,
 
-//       error: error.message,
-//     });
-//   }
-// }
+      error: error.message,
+    });
+  }
+}
 
 ////////////////////////////////
 //// Phone masking ////////////

@@ -22,6 +22,7 @@ const PaymentService = require("../src/services/paymentService");
 const authenticate = require("../middleware/authenticate");
 const vendor_auth = require("../auth/vendor_auth");
 const { authRateLimiter } = require("../src/middleware/rateLimiter");
+const SignupFeeConfig = require("../models/signupFeeConfig");
 
 /////////////////////
 //// for vendor ////
@@ -51,20 +52,15 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// ============================================================
-// VENDOR SIGNUP PAYMENT
-// ₹50 mandatory payment
-// ============================================================
-
-const VENDOR_SIGNUP_AMOUNT = 50;
-const VENDOR_SIGNUP_AMOUNT_PAISE = 5000;
-
 // ------------------------------------------------------------
 // CREATE RAZORPAY ORDER
 // ------------------------------------------------------------
 
-router.post("/signup/create-order", authRateLimiter, async (req, res) => {
+router.post("/signup/create-order", authRateLimiter, async (req, res, next) => {
   const requestId = req.requestId || crypto.randomUUID();
+
+  let signupPayment = null;
+  let transaction = null;
 
   try {
     const {
@@ -80,20 +76,6 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
       validPhoneNoId,
       agreedToTnCnP,
     } = req.body;
-
-    // ======================================================
-    // FCM TOKEN LOG
-    // ======================================================
-
-    VendorLogger.info(
-      {
-        requestId,
-        phoneNo: phoneNo ? String(phoneNo) : null,
-        hasFcmToken: Boolean(fcmToken),
-        fcmTokenLength: fcmToken ? String(fcmToken).length : 0,
-      },
-      "Vendor signup create-order request received",
-    );
 
     // ======================================================
     // VALIDATION
@@ -126,22 +108,19 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
       });
     }
 
-    if (!validPhoneNoId) {
+    // if (!validPhoneNoId) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: "Phone verification is required",
+    //   });
+    // }
+
+    if (!agreedToTnCnP) {
       return res.status(400).json({
-        message: "Phone verification is required",
+        success: false,
+        message: "Terms and conditions are required",
       });
     }
-
-    await OtpAuthorizationService.consume({
-      otpId: validPhoneNoId,
-      accountType: "vendor",
-      accountId: null,
-      purpose: "verify_phone",
-      target: phoneNumber,
-    });
-    // ======================================================
-    // JOBS
-    // ======================================================
 
     if (!Array.isArray(type) || type.length < 1 || type.length > 5) {
       return res.status(400).json({
@@ -160,34 +139,31 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
     }
 
     // ======================================================
-    // TERMS
+    // VERIFY PHONE OTP
     // ======================================================
 
-    if (!agreedToTnCnP) {
-      return res.status(400).json({
-        success: false,
-        message: "Terms and conditions are required",
-      });
-    }
+    // await OtpAuthorizationService.consume({
+    //   otpId: validPhoneNoId,
+    //   accountType: "vendor",
+    //   accountId: null,
+    //   purpose: "verify_phone",
+    //   target: phoneNumber,
+    // });
 
     // ======================================================
-    // CHECK EXISTING VENDOR
+    // CHECK EXISTING USER / VENDOR
     // ======================================================
 
     const [existingUser, existingVendor] = await Promise.all([
-      User.exists({
-        phoneNo: phoneNumber,
-      }),
-      Vendor.exists({
-        phoneNo: phoneNumber,
-      }),
+      User.exists({ phoneNo: phoneNumber }),
+      Vendor.exists({ phoneNo: phoneNumber }),
     ]);
 
-    if (existingVendor || existingUser) {
+    if (existingUser || existingVendor) {
       VendorLogger.warn(
         {
           requestId,
-          phoneNo: cleanPhone,
+          phoneNo: cleanPhone.slice(-4),
         },
         "Vendor signup blocked because number already exists",
       );
@@ -199,14 +175,61 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
     }
 
     // ======================================================
-    // SIGNUP TOKEN
+    // LOAD CURRENT SIGNUP FEE
+    // ======================================================
+
+    const feeConfig = await SignupFeeConfig.findOne({
+      key: "signup-fees",
+    }).lean();
+
+    const vendorAmountPaise = feeConfig?.vendorAmountPaise ?? DEFAULT_VENDOR_SIGNUP_AMOUNT_PAISE;
+
+    if (!Number.isSafeInteger(vendorAmountPaise) || vendorAmountPaise < 0) {
+      VendorLogger.error({ requestId }, "Invalid vendor signup fee configuration");
+
+      return res.status(500).json({
+        success: false,
+        message: "Invalid signup fee configuration",
+      });
+    }
+
+    const vendorSignupAmount = vendorAmountPaise / 100;
+
+    // This route currently supports paid signup only.
+    // A zero-fee signup requires a separate free-signup flow.
+    // ======================================================
+    // FREE SIGNUP: NO RAZORPAY ORDER
+    // ======================================================
+
+    if (vendorAmountPaise === 0) {
+      VendorLogger.info(
+        {
+          requestId,
+          signupFee: 0,
+          flow: "free_signup",
+        },
+        "Processing free vendor signup",
+      );
+
+      return vendor_auth.signup(req, res, next);
+    }
+
+    // Fee > 0: continue existing Razorpay flow.
+
+    VendorLogger.info(
+      {
+        requestId,
+        vendorAmountPaise,
+        vendorSignupAmount,
+      },
+      "Vendor signup fee loaded",
+    );
+
+    // ======================================================
+    // SIGNUP TOKEN & PASSWORD HASH
     // ======================================================
 
     const signupToken = crypto.randomBytes(32).toString("hex");
-
-    // ======================================================
-    // HASH PASSWORD
-    // ======================================================
 
     const hashedPw = await bcrypt.hash(cleanPassword, ENV.BCRYPT_ROUNDS || 10);
 
@@ -214,68 +237,37 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
     // CREATE TEMPORARY SIGNUP
     // ======================================================
 
-    const signupPayment = await VendorSignupPayment.create({
+    signupPayment = await VendorSignupPayment.create({
       signupToken,
-
       name: cleanName,
-
       phoneNo: phoneNumber,
-
       password: hashedPw,
-
       gender: String(gender || ""),
-
       type: jobs,
-
       experience: Number(experience) || 0,
-
       sharedBy: String(sharedBy || ""),
-
       cd: String(cd || ""),
-
       validPhoneNoId: String(validPhoneNoId || ""),
-
       agreedToTnCnP: true,
 
-      amount: VENDOR_SIGNUP_AMOUNT,
+      // Amount stored in rupees in this schema.
+      amount: vendorSignupAmount,
 
       status: "created",
-
-      // ==================================================
-      // FCM TOKEN
-      // ==================================================
-
       fcmToken: String(fcmToken || "").trim(),
-
       expiresAt: new Date(Date.now() + 15 * 60 * 1000),
     });
 
-    VendorLogger.info(
-      {
-        requestId,
-
-        signupId: signupPayment._id?.toString(),
-
-        hasFcmToken: Boolean(signupPayment.fcmToken),
-
-        fcmTokenLength: signupPayment.fcmToken?.length || 0,
-
-        phoneNo: cleanPhone.slice(-4),
-      },
-      "Vendor signup payment session created",
-    );
-
     // ======================================================
-    // RAZORPAY ORDER
+    // CREATE RAZORPAY ORDER
     // ======================================================
 
     const shortReceipt = `vs_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
     const order = await razorpay.orders.create({
-      amount: 5000,
+      amount: vendorAmountPaise,
       currency: "INR",
       receipt: shortReceipt,
-
       notes: {
         purpose: "vendor_signup",
         signupToken,
@@ -285,81 +277,46 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
     VendorLogger.info(
       {
         requestId,
-
-        signupId: signupPayment._id?.toString(),
-
+        signupId: signupPayment._id.toString(),
         razorpayOrderId: order.id,
-
-        amount: order.amount,
-
+        amountPaise: order.amount,
         currency: order.currency,
       },
       "Vendor signup Razorpay order created",
     );
 
     // ======================================================
-    // TRANSACTION
+    // CREATE TRANSACTION
     // ======================================================
 
-    const transaction = await Transaction.create({
-      amount: 50,
-
-      finalAmount: 50,
-
+    transaction = await Transaction.create({
+      amount: vendorSignupAmount,
+      finalAmount: vendorSignupAmount,
       currency: "INR",
-
       paymentGateway: "razorpay",
-
       razorpayOrderId: order.id,
-
       gatewayOrderId: order.id,
-
       status: "initiated",
-
       paymentStatus: "pending",
-
       category: "vendor_signup",
-
       requestId,
-
       metadata: {
         orderId: order.id,
-
-        requestedAmount: 50,
-
+        requestedAmount: vendorSignupAmount,
+        amountPaise: vendorAmountPaise,
         currency: "INR",
-
         gateway: "razorpay",
-
         signupToken,
-
         signupPayment: true,
       },
     });
 
-    VendorLogger.info(
-      {
-        requestId,
-
-        transactionId: transaction._id?.toString(),
-
-        razorpayOrderId: order.id,
-
-        amount: transaction.finalAmount,
-
-        category: transaction.category,
-      },
-      "Vendor signup transaction created",
-    );
-
     // ======================================================
-    // SAVE ORDER ID
+    // LINK ORDER TO SIGNUP
     // ======================================================
 
     await VendorSignupPayment.updateOne(
-      {
-        signupToken,
-      },
+      { _id: signupPayment._id },
       {
         $set: {
           razorpayOrderId: order.id,
@@ -370,12 +327,12 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
     VendorLogger.info(
       {
         requestId,
-
-        signupId: signupPayment._id?.toString(),
-
+        signupId: signupPayment._id.toString(),
+        transactionId: transaction._id.toString(),
         razorpayOrderId: order.id,
+        amountPaise: vendorAmountPaise,
       },
-      "Vendor signup Razorpay order linked to signup",
+      "Vendor signup order and transaction linked",
     );
 
     // ======================================================
@@ -384,16 +341,16 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
 
     return res.status(200).json({
       success: true,
-
       signupToken,
-
+      signupFee: {
+        amountPaise: vendorAmountPaise,
+        amountRupees: vendorSignupAmount,
+        currency: "INR",
+      },
       order: {
         id: order.id,
-
         amount: order.amount,
-
         currency: order.currency,
-
         key: process.env.RAZORPAY_KEY_ID,
       },
     });
@@ -401,15 +358,32 @@ router.post("/signup/create-order", authRateLimiter, async (req, res) => {
     VendorLogger.error(
       {
         requestId,
-
         error: error.message,
-
         code: error.code || null,
-
         stack: error.stack,
       },
       "Vendor signup create-order failed",
     );
+
+    // Best-effort cleanup for records created before a failure.
+    // Never delete a transaction if a Razorpay order was already created;
+    // it may still need reconciliation.
+    if (signupPayment && !transaction) {
+      try {
+        await VendorSignupPayment.deleteOne({
+          _id: signupPayment._id,
+          status: "created",
+        });
+      } catch (cleanupError) {
+        VendorLogger.error(
+          {
+            requestId,
+            error: cleanupError.message,
+          },
+          "Vendor signup cleanup failed",
+        );
+      }
+    }
 
     return res.status(500).json({
       success: false,
