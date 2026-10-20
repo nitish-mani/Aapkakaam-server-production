@@ -108,12 +108,12 @@ router.post("/signup/create-order", authRateLimiter, async (req, res, next) => {
       });
     }
 
-    // if (!validPhoneNoId) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     message: "Phone verification is required",
-    //   });
-    // }
+    if (!validPhoneNoId) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone verification is required",
+      });
+    }
 
     if (!agreedToTnCnP) {
       return res.status(400).json({
@@ -142,13 +142,13 @@ router.post("/signup/create-order", authRateLimiter, async (req, res, next) => {
     // VERIFY PHONE OTP
     // ======================================================
 
-    // await OtpAuthorizationService.consume({
-    //   otpId: validPhoneNoId,
-    //   accountType: "vendor",
-    //   accountId: null,
-    //   purpose: "verify_phone",
-    //   target: phoneNumber,
-    // });
+    await OtpAuthorizationService.consume({
+      otpId: validPhoneNoId,
+      accountType: "vendor",
+      accountId: null,
+      purpose: "verify_phone",
+      target: phoneNumber,
+    });
 
     // ======================================================
     // CHECK EXISTING USER / VENDOR
